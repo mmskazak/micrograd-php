@@ -67,7 +67,7 @@ php -S localhost:8000 -t public
 
 | # | Страница | Что разбирается |
 |---|---|---|
-| 1 | `learn/value.html` | Value: data, grad, граф вычислений; пошаговый backward на L = (a·b + c)·f, проверка grad через «подтолкнуть на h» |
+| 1 | `learn/value.html` | Value: data, grad, граф вычислений; пошаговый backward на нейроне из видео o = tanh(x1·w1 + x2·w2 + b), проверка grad через «подтолкнуть на h» |
 | 2 | `learn/neuron.html` | Нейрон: ползунки для x, w, b; график tanh и его наклон (насыщение); граф Value нейрона |
 | 3 | `learn/layer.html` | Слой: один вход для всех нейронов, свои веса у каждого; nin / nout; число параметров |
 | 4 | `learn/mlp.html` | MLP: как `[nin, ...nouts]` превращается в слои; анимация прямого прохода |

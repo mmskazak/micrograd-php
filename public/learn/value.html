@@ -19,8 +19,10 @@
   </header>
 
   <section class="card">
-    <h2>Пример из видео: L = (a · b + c) · f</h2>
-    <p>Двигайте ползунки: граф пересчитывается слева направо (это <b>forward</b>). Кликните по любому прямоугольнику, чтобы увидеть, что лежит внутри объекта.</p>
+    <h2>Пример из видео: нейрон o = tanh(x₁·w₁ + x₂·w₂ + b)</h2>
+    <p>Два входа <b>x</b>, два веса <b>w</b>, bias <b>b</b> и активация <b>tanh</b> — это один нейрон, собранный вручную из Value.
+      Значения как у Карпатого: b = 6.8814 подобран так, что o = 0.7071 и наклон tanh ровно 1 − o² = 0.5, поэтому градиенты получаются круглыми.
+      Двигайте ползунки: граф пересчитывается слева направо (это <b>forward</b>). Клик по прямоугольнику показывает, что лежит внутри объекта.</p>
     <div id="sl"></div>
     <div class="graph-box"><svg id="g"></svg></div>
     <div class="two" style="margin-top:12px">
@@ -33,7 +35,9 @@
         <h2>Внутри выбранного Value</h2>
         <div class="obj" id="obj"></div>
         <p class="note">Прямоугольник на графе — объект <code>Value</code>. Кружок — операция, которая его породила.
-          У листьев (a, b, c, f) операции нет: это исходные числа.</p>
+          У листьев (x₁, x₂, w₁, w₂, b) операции нет: это исходные числа.</p>
+        <p class="note">Обратите внимание на <b>x₂ = 0</b>: у w₂ градиент 0. Вес, который умножается на ноль, на выход не влияет, как его ни меняй.
+          Сдвиньте x₂, и w₂.grad оживёт.</p>
       </div>
     </div>
   </section>
@@ -45,11 +49,11 @@
     </article>
     <article class="card">
       <h2>Что такое grad «на пальцах»</h2>
-      <p><b>grad</b> узла — насколько изменится L, если чуть-чуть увеличить этот узел.
-        Проверим без всякого backward: прибавим к каждому листу h = 0.001 и посмотрим, как сдвинулся L.</p>
+      <p><b>grad</b> узла — насколько изменится выход o, если чуть-чуть увеличить этот узел.
+        Проверим без всякого backward: прибавим к каждому листу h = 0.001 и посмотрим, как сдвинулся o.</p>
       <table class="t" id="num"></table>
       <p class="note">Числа совпадают: backward вычисляет ровно это, только сразу для всех узлов за один проход,
-        без того чтобы пересчитывать L по разу на каждый вес.</p>
+        без того чтобы пересчитывать o по разу на каждый вес.</p>
     </article>
   </section>
 
@@ -71,7 +75,7 @@ const CODE = `
 final class Value
 {
     public float $data;         // само число
-    public float $grad = 0.0;   // ∂L/∂(это число), заполняется в backward()
+    public float $grad = 0.0;   // ∂o/∂(это число), заполняется в backward()
     public array $prev;         // из каких Value получено
     public string $op;          // какой операцией: '+', '*', 'tanh'
 
@@ -95,6 +99,16 @@ final class Value
         return $out;
     }
 
+    public function tanh(): Value
+    {
+        $t = tanh($this->data);
+        $out = new Value($t, [$this], 'tanh');
+        $out->backwardFn = function () use ($out, $t) {
+            $this->grad += (1 - $t * $t) * $out->grad;   // d tanh / dx = 1 − tanh²
+        };
+        return $out;
+    }
+
     public function backward(): void
     {
         $topo = /* все узлы: каждый после своих родителей */;
@@ -105,25 +119,29 @@ final class Value
     }
 }`;
 
-let S = { a: 2, b: -3, c: 10, f: -2 };
+let S = { x1: 2, x2: 0, w1: -3, w2: 1, b: 6.8813735870195432 };
 let graph, stepper, sel = null, k = 0;
+const LEAVES = ['x1', 'x2', 'w1', 'w2', 'b'];
 
 function build(vals) {
-  const a = new V(vals.a, [], '', 'a'), b = new V(vals.b, [], '', 'b');
-  const c = new V(vals.c, [], '', 'c'), f = new V(vals.f, [], '', 'f');
-  const e = a.mul(b); e.label = 'e = a·b';
-  const d = e.add(c); d.label = 'd = e + c';
-  const L = d.mul(f); L.label = 'L = d·f';
-  return { a, b, c, f, e, d, L };
+  const x1 = new V(vals.x1, [], '', 'x1'), x2 = new V(vals.x2, [], '', 'x2');
+  const w1 = new V(vals.w1, [], '', 'w1'), w2 = new V(vals.w2, [], '', 'w2');
+  const b = new V(vals.b, [], '', 'b');
+  const x1w1 = x1.mul(w1); x1w1.label = 'x1·w1';
+  const x2w2 = x2.mul(w2); x2w2.label = 'x2·w2';
+  const s = x1w1.add(x2w2); s.label = 'x1·w1+x2·w2';
+  const n = s.add(b); n.label = 'n';
+  const o = n.tanh(); o.label = 'o';
+  return { x1, x2, w1, w2, b, x1w1, x2w2, s, n, o };
 }
-const short = (v) => v.label.split(' ')[0];
+const short = (v) => v.label;
 
 function render() {
   stepper.go(k);
   const info = stepper.info;
   const recv = new Set(info ? info.node.prev : []);
-  drawGraph($('g'), graph.L, {
-    active: info?.node ?? (k === 1 ? graph.L : null), recv, sel,
+  drawGraph($('g'), graph.o, {
+    active: info?.node ?? (k === 1 ? graph.o : null), recv, sel,
     onClick: (v) => { sel = v; render(); },
     explain: (v) => `<b>${esc(v.label)}</b><br>data = ${f3(v.data)}<br>grad = ${f3(v.grad)}${v.prev.length ? '' : '<br>лист: исходное число'}`,
   });
@@ -132,14 +150,15 @@ function render() {
 
   // подсветка кода
   let hl = [];
-  if (k === 0) hl = [[10], [20]];
-  else if (k === 1) hl = [[31]];
+  if (k === 0) hl = [[10], [20], [30, 31]];
+  else if (k === 1) hl = [[41]];
   else if (info.node.op === '+') hl = [[11, 14]];
   else if (info.node.op === '*') hl = [[21, 24]];
-  if (k >= 2) hl.push([33]);
+  else if (info.node.op === 'tanh') hl = [[32, 34]];
+  if (k >= 2) hl.push([43]);
   renderCode($('code'), CODE, hl);
 
-  const v = sel ?? graph.L;
+  const v = sel ?? graph.o;
   $('obj').innerHTML = `<span class="f">$${esc(short(v))} = </span>Value {<br>
     &nbsp;&nbsp;<span class="f">data</span> = ${f3(v.data)}<br>
     &nbsp;&nbsp;<span class="f">grad</span> = ${f3(v.grad)}<br>
@@ -149,19 +168,19 @@ function render() {
 
 function numeric() {
   const h = 0.001;
-  const L0 = build(S).L.data;
-  const G = build(S); G.L.backward();
-  let rows = '<tr><th>лист</th><th>grad (backward)</th><th>(L(x+h) − L(x)) / h</th></tr>';
-  for (const name of ['a', 'b', 'c', 'f']) {
-    const L1 = build({ ...S, [name]: S[name] + h }).L.data;
-    rows += `<tr><td class="mono">${name}</td><td>${f3(G[name].grad)}</td><td>${f3((L1 - L0) / h)}</td></tr>`;
+  const o0 = build(S).o.data;
+  const G = build(S); G.o.backward();
+  let rows = '<tr><th>лист</th><th>grad (backward)</th><th>(o(x+h) − o(x)) / h</th></tr>';
+  for (const name of LEAVES) {
+    const o1 = build({ ...S, [name]: S[name] + h }).o.data;
+    rows += `<tr><td class="mono">${name}</td><td>${f3(G[name].grad)}</td><td>${f3((o1 - o0) / h)}</td></tr>`;
   }
   $('num').innerHTML = rows;
 }
 
 function rebuild() {
   graph = build(S);
-  stepper = new BackwardStepper(graph.L);
+  stepper = new BackwardStepper(graph.o);
   sel = sel ? graph[Object.keys(graph).find((key) => graph[key].label === sel.label)] : null;
   render(); numeric();
 }
@@ -172,8 +191,9 @@ const ctl = stepperControls($('steps'), (a) => {
   render();
 });
 sliders('sl', [
-  { name: 'a', min: -5, max: 5, value: S.a }, { name: 'b', min: -5, max: 5, value: S.b },
-  { name: 'c', min: -10, max: 10, value: S.c }, { name: 'f', min: -5, max: 5, value: S.f },
+  { name: 'x1', label: 'x₁', min: -3, max: 3, value: S.x1 }, { name: 'x2', label: 'x₂', min: -3, max: 3, value: S.x2 },
+  { name: 'w1', label: 'w₁', min: -4, max: 4, value: S.w1 }, { name: 'w2', label: 'w₂', min: -4, max: 4, value: S.w2 },
+  { name: 'b', min: -8, max: 8, step: 0.01, value: S.b },
 ], (vals) => { S = { ...vals }; rebuild(); });
 rebuild();
 </script>
