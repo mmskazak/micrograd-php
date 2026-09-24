@@ -1,0 +1,547 @@
+'use strict';
+
+// ---------- состояние ----------
+const S = {
+  sizes: [], segments: {}, digits: {}, params: [], history: [], epoch: 0,
+  x: [], target: null,          // target = null → «авто»
+  fwd: null,                    // ответ ?action=forward для текущего входа
+  mode: 'signal',
+  sel: { l: 0, n: 0 },          // нейрон под лупой (индекс слоя модели, индекс нейрона)
+  paramsView: null,             // веса для показа во время анимации шага
+  gradsView: null,              // градиенты для показа во время анимации шага
+  busy: false,
+};
+
+const $ = (id) => document.getElementById(id);
+const NS = 'http://www.w3.org/2000/svg';
+const fmt = (v, d = 3) => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(d);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function api(action, body) {
+  const res = await fetch('api.php?action=' + action, body === undefined ? {} : {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const json = await res.json();
+  if (json.error) throw new Error(json.error);
+  return json;
+}
+
+// ---------- цвета ----------
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
+function mix(a, b, t) {
+  const A = hexToRgb(a), B = hexToRgb(b);
+  return `rgb(${A.map((v, i) => Math.round(v + (B[i] - v) * t)).join(',')})`;
+}
+/** Расходящаяся шкала: −1 красный … 0 серый … +1 синий */
+function diverge(v, zeroVar = '--zero') {
+  const t = Math.max(-1, Math.min(1, v));
+  return mix(cssVar(zeroVar), cssVar(t >= 0 ? '--pos' : '--neg'), Math.abs(t));
+}
+
+// ---------- имена ----------
+const lastLayer = () => S.sizes.length - 2;
+function neuronName(l, n) {
+  return l === lastLayer() ? `выход «${n}»` : `слой ${l + 1}, нейрон ${n + 1}`;
+}
+function inputName(l, i) {
+  return l === 0 ? `x${i + 1}` : `h${l}.${i + 1}`;
+}
+
+// ---------- 1. шаблон индекса ----------
+function renderTemplate() {
+  const svg = $('template');
+  const k = 100; // масштаб: шаблон 1×2 → 100×200
+  let html = '';
+  for (const [num, s] of Object.entries(S.segments)) {
+    const [x1, y1] = s.from.map((v) => v * k), [x2, y2] = s.to.map((v) => v * k);
+    const on = S.x[num - 1] ? 'on' : '';
+    html += `<g data-seg="${num}"><title>${num}: ${s.name}</title>
+      <line class="seg-hit" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>
+      <line class="seg-line ${on}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/></g>`;
+  }
+  // номера палочек: смещены от середины наружу, чтобы не лежать на линии
+  const off = { 1: [0, -16], 2: [-20, 0], 3: [20, 0], 4: [14, 10], 5: [0, -12], 6: [-20, 0], 7: [20, 0], 8: [14, 10], 9: [0, 16] };
+  for (const [num, s] of Object.entries(S.segments)) {
+    const mx = (s.from[0] + s.to[0]) / 2 * k + off[num][0], my = (s.from[1] + s.to[1]) / 2 * k + off[num][1];
+    html += `<g class="seg-num"><circle cx="${mx}" cy="${my}" r="8"/><text x="${mx}" y="${my}">${num}</text></g>`;
+  }
+  svg.innerHTML = html;
+  svg.querySelectorAll('[data-seg]').forEach((g) => g.addEventListener('click', () => toggleSegment(+g.dataset.seg - 1)));
+
+  $('vec-raw').textContent = '[' + S.x.join(', ') + ']';
+  $('vec-enc').textContent = '[' + S.x.map((v) => (v ? '+1' : '−1')).join(', ') + ']';
+  const m = S.fwd ? S.fwd.matched : null;
+  document.querySelectorAll('#digit-buttons button').forEach((b) => b.classList.toggle('on', +b.dataset.d === m));
+}
+
+function toggleSegment(i) {
+  if (S.busy) return;
+  S.x[i] = S.x[i] ? 0 : 1;
+  S.target = null;
+  refresh();
+}
+
+// ---------- 2. сеть ----------
+const NET = { W: 760, top: 44, bottom: 486, left: 70, right: 660, r: 14 };
+function nodePos(c, i) {
+  const n = S.sizes[c];
+  const x = NET.left + c * (NET.right - NET.left) / (S.sizes.length - 1);
+  const step = Math.min(44, (NET.bottom - NET.top) / (n - 1));
+  const mid = (NET.top + NET.bottom) / 2;
+  return [x, mid + (i - (n - 1) / 2) * step];
+}
+
+/** Значение на связи вход i → нейрон n слоя l в текущем режиме */
+function edgeValue(l, n, i) {
+  if (S.mode === 'signal') return S.fwd.neurons[l][n].muls[i].data;
+  if (S.mode === 'weights') return (S.paramsView || S.params)[l][n].w[i];
+  return (S.gradsView || S.fwd.grads)[l][n].w[i];
+}
+function nodeValue(c, i) {
+  if (c === 0) return S.fwd.encoded[i];
+  return S.fwd.neurons[c - 1][i].out.data;
+}
+
+const MODE_HINT = {
+  signal: 'Сигнал w·x: сколько каждая связь добавляет в сумму нейрона для текущего входа. Это и есть forward.',
+  weights: 'Веса w: то, чему сеть научилась. Именно эти числа хранятся в SQLite.',
+  grads: 'Градиент ∂loss/∂w для текущего примера и выбранного правильного ответа. Update сдвинет вес против градиента: синий уменьшится, красный вырастет.',
+};
+
+function renderNet() {
+  const svg = $('net');
+  const L = S.sizes.length;
+  const labels = ['вход: палочки', ...S.sizes.slice(1, -1).map((_, i) => `скрытый слой ${i + 1}`), 'выход: цифры'];
+  let html = '';
+  for (let c = 0; c < L; c++) {
+    html += `<g class="layer" data-c="${c}">`;
+    const [lx] = nodePos(c, 0);
+    html += `<text class="col-label" x="${lx}" y="16">${labels[c]} (${S.sizes[c]})</text>`;
+    if (c > 0) {
+      const l = c - 1;
+      let max = 1e-9;
+      for (let n = 0; n < S.sizes[c]; n++) for (let i = 0; i < S.sizes[c - 1]; i++) max = Math.max(max, Math.abs(edgeValue(l, n, i)));
+      for (let n = 0; n < S.sizes[c]; n++) {
+        const [x2, y2] = nodePos(c, n);
+        const isSel = S.sel.l === l && S.sel.n === n;
+        for (let i = 0; i < S.sizes[c - 1]; i++) {
+          const [x1, y1] = nodePos(c - 1, i);
+          const t = edgeValue(l, n, i) / max;
+          const w = 0.4 + 3.6 * Math.abs(t);
+          const op = 0.12 + 0.88 * Math.abs(t);
+          const mx = (x1 + x2) / 2;
+          html += `<path class="edge${isSel ? ' sel' : ''}" data-l="${l}" data-n="${n}" d="M${x1 + NET.r},${y1} C${mx},${y1} ${mx},${y2} ${x2 - NET.r},${y2}"
+            stroke="${diverge(t)}" stroke-width="${w.toFixed(2)}" opacity="${op.toFixed(2)}"/>`;
+        }
+      }
+    }
+    for (let i = 0; i < S.sizes[c]; i++) {
+      const [x, y] = nodePos(c, i);
+      const v = nodeValue(c, i);
+      const sel = c > 0 && S.sel.l === c - 1 && S.sel.n === i ? ' sel' : '';
+      const dark = Math.abs(v) > 0.55;
+      html += `<g class="node${sel}" data-c="${c}" data-i="${i}">
+        <circle cx="${x}" cy="${y}" r="${NET.r}" fill="${diverge(v, '--node-zero')}"/>
+        <text class="val" x="${x}" y="${y}" style="${dark ? 'fill:#fff' : ''}">${c === 0 ? (v > 0 ? '+1' : '−1') : v.toFixed(2).replace('-', '−')}</text>`;
+      if (c === 0) html += `<text x="${x - 30}" y="${y}">x${i + 1}</text>`;
+      if (c === L - 1) html += `<text x="${x + 28}" y="${y}" style="font-size:14px;font-weight:700">${i}</text>`;
+      html += '</g>';
+    }
+    html += '</g>';
+  }
+  svg.innerHTML = html;
+  // выбранный нейрон рисуем поверх остальных связей
+  svg.querySelectorAll('.edge.sel').forEach((e) => e.parentNode.insertBefore(e, e.parentNode.querySelector('.node')));
+
+  svg.querySelectorAll('.node').forEach((g) => {
+    const c = +g.dataset.c, i = +g.dataset.i;
+    g.addEventListener('click', () => {
+      if (c === 0) return toggleSegment(i);
+      S.sel = { l: c - 1, n: i };
+      renderNet(); renderNeuron();
+    });
+    g.addEventListener('mouseenter', (ev) => {
+      if (c > 0) {
+        svg.classList.add('dim-edges');
+        svg.querySelectorAll(`.edge[data-l="${c - 1}"][data-n="${i}"]`).forEach((e) => e.classList.add('sel'));
+      }
+      const t = c === 0
+        ? `Палочка ${i + 1} (${S.segments[i + 1].name}): ${S.x[i] ? 'есть → +1' : 'нет → −1'}. Клик — переключить.`
+        : `${neuronName(c - 1, i)}: out = ${fmt(nodeValue(c, i))}, b = ${fmt((S.paramsView || S.params)[c - 1][i].b)}. Клик — под лупу.`;
+      showTip(ev, t);
+    });
+    g.addEventListener('mouseleave', () => {
+      svg.classList.remove('dim-edges');
+      svg.querySelectorAll('.edge.sel').forEach((e) => {
+        const l = +e.dataset.l, n = +e.dataset.n;
+        if (!(S.sel.l === l && S.sel.n === n)) e.classList.remove('sel');
+      });
+      hideTip();
+    });
+    g.addEventListener('mousemove', moveTip);
+  });
+  $('mode-hint').textContent = MODE_HINT[S.mode];
+}
+
+// ---------- 3. выход ----------
+function renderOutputs() {
+  const f = S.fwd;
+  $('answer').textContent = f.prediction;
+  let html = '';
+  f.outputs.forEach((v, d) => {
+    const left = v >= 0 ? 50 : 50 + v * 50, width = Math.abs(v) * 50;
+    html += `<div class="bar-row${d === f.prediction ? ' win' : ''}${d === f.target ? ' goal' : ''}" title="нейрон «${d}»: tanh = ${fmt(v)}${d === f.target ? ' · цель +1' : ' · цель −1'}">
+      <span class="d">${d}</span>
+      <span class="track"><span class="fill" style="left:${left}%;width:${width}%;background:${cssVar(v >= 0 ? '--pos' : '--neg')}"></span></span>
+      <span class="v">${fmt(v, 2)}</span></div>`;
+  });
+  $('bars').innerHTML = html;
+  $('loss-one').textContent = f.loss.toFixed(4);
+
+  const sel = $('target');
+  const auto = f.matched !== null ? `авто: ${f.matched} (совпадает с шаблоном)` : `авто: ${f.prediction} (ответ сети)`;
+  sel.innerHTML = `<option value="">${auto}</option>` +
+    Object.keys(S.digits).map((d) => `<option value="${d}"${S.target === +d ? ' selected' : ''}>${d}</option>`).join('');
+}
+
+// ---------- 4. нейрон под лупой: граф Value ----------
+function renderNeuron() {
+  const { l, n } = S.sel;
+  const t = S.fwd.neurons[l][n];
+  const k = t.w.length;
+  $('neuron-name').textContent = neuronName(l, n);
+
+  const num = (v) => (v < 0 ? `(−${Math.abs(v).toFixed(2)})` : v.toFixed(2));
+  const terms = t.w.map((w, i) => `${num(w.data)}·${num(t.x[i].data)}`).join(' + ');
+  const pre = t.sums[k - 1].data;
+  $('neuron-formula').textContent = `out = tanh(b + Σ wᵢ·xᵢ) = tanh(${t.b.data.toFixed(2).replace('-', '−')} + ${terms}) = tanh(${fmt(pre, 3)}) = ${fmt(t.out.data)}`;
+
+  const rowH = 52, top = 64;
+  const C = { leaf: 8, leafW: 210, mul: 262, opW: 150, sum: 462, tanh: 664, tanhW: 160 };
+  const cy = (i) => top + i * rowH + 22;
+  const H = top + k * rowH + 20, W = C.tanh + C.tanhW + 10;
+  const svg = $('graph');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.style.minWidth = '640px';
+  svg.style.width = '100%';
+
+  const esc = (s) => s.replace(/"/g, '&quot;');
+  const g = (v) => `∇ ${fmt(v.grad, 4)}`;
+  const bar = (x, y, w, grad) => {
+    // полоска под узлом: цвет — знак градиента, длина — величина (относительно самого большого в графе)
+    const len = Math.min(1, Math.abs(grad) / gMax) * (w - 8);
+    return `<rect class="bar" x="${x + 4}" y="${y}" width="${len.toFixed(1)}" height="3" rx="1.5" fill="${cssVar(grad >= 0 ? '--pos' : '--neg')}"/>`;
+  };
+  const all = [...t.w, ...t.x, ...t.muls, ...t.sums, t.b, t.out];
+  const gMax = Math.max(1e-9, ...all.map((v) => Math.abs(v.grad)));
+
+  // leaf: одна строка «метка = data │ ∇ grad»
+  const leaf = (x, y, w, label, v, tip) => `<g class="box" data-tip="${esc(tip)}">
+      <rect x="${x}" y="${y}" width="${w}" height="21" rx="5"/>
+      <text class="lbl" x="${x + 7}" y="${y + 10}">${label}</text>
+      <text x="${x + 50}" y="${y + 10}">${fmt(v.data)}</text>
+      <text class="g" x="${x + 118}" y="${y + 10}">${g(v)}</text>
+      ${bar(x, y + 17, w, v.grad)}</g>`;
+  // op: символ операции + две строки data/grad
+  const op = (x, y, w, sym, v, tip) => `<g class="box op" data-tip="${esc(tip)}">
+      <rect x="${x}" y="${y}" width="${w}" height="38" rx="6"/>
+      <text class="opchar" x="${x + 18}" y="${y + 19}">${sym}</text>
+      <text x="${x + 38}" y="${y + 12}">${fmt(v.data)}</text>
+      <text class="g" x="${x + 38}" y="${y + 27}">${g(v)}</text>
+      ${bar(x, y + 34, w, v.grad)}</g>`;
+  const link = (x1, y1, x2, y2) => {
+    const mx = (x1 + x2) / 2;
+    return `<path class="link" marker-end="url(#arr)" d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}"/>`;
+  };
+
+  let links = '', boxes = '';
+  // bias — стартовое значение суммы
+  const bY = 8;
+  boxes += op(C.sum, bY, C.opW, 'b', t.b,
+    `b — стартовое значение суммы. ∇b = ∇ первого «+» = ${fmt(t.sums[0].grad, 4)} (у сложения градиент проходит без изменений).`);
+  links += `<path class="link" marker-end="url(#arr)" d="M${C.sum + C.opW / 2},${bY + 38} L${C.sum + C.opW / 2},${cy(0) - 21}"/>`;
+
+  for (let i = 0; i < k; i++) {
+    const y = cy(i), w = t.w[i], x = t.x[i], m = t.muls[i], s = t.sums[i];
+    const xn = inputName(l, i);
+    boxes += leaf(C.leaf, y - 23, C.leafW, `w${i + 1}`, w,
+      `∇w${i + 1} = x${i + 1} · ∇× = ${fmt(x.data)} · ${fmt(m.grad, 4)} = ${fmt(w.grad, 4)}. Update: w −= lr·∇w.`);
+    boxes += leaf(C.leaf, y + 2, C.leafW, xn, x,
+      l === 0
+        ? `${xn} — вход (палочка ${i + 1}). Его ∇ считается, но менять вход нечего: учатся только веса.`
+        : `${xn} — выход нейрона предыдущего слоя. Его ∇ — сумма вкладов от ВСЕХ нейронов этого слоя, которые его читают (grad += …). Отсюда градиент идёт дальше назад.`);
+    boxes += op(C.mul, y - 19, C.opW, '×', m,
+      `×: ${fmt(w.data)} · ${fmt(x.data)} = ${fmt(m.data)}. ∇× = ∇ своего «+» = ${fmt(s.grad, 4)}. Дальше делится между множителями: ∇w = x·∇×, ∇x = w·∇×.`);
+    boxes += op(C.sum, y - 19, C.opW, '+', s,
+      i === k - 1
+        ? `Итоговая сумма ${fmt(s.data)}. ∇ = (1 − tanh²) · ∇out = (1 − ${t.out.data.toFixed(3)}²) · ${fmt(t.out.grad, 4)} = ${fmt(s.grad, 4)}.`
+        : `Накопленная сумма после ${i + 1}-го слагаемого. У «+» градиент проходит к обоим слагаемым без изменений.`);
+    links += link(C.leaf + C.leafW, y - 12, C.mul, y - 4);
+    links += link(C.leaf + C.leafW, y + 12, C.mul, y + 4);
+    links += link(C.mul + C.opW, y, C.sum, y);
+    if (i > 0) links += `<path class="link" marker-end="url(#arr)" d="M${C.sum + C.opW / 2},${cy(i - 1) + 19} L${C.sum + C.opW / 2},${y - 21}"/>`;
+  }
+  const yOut = cy(k - 1);
+  boxes += op(C.tanh, yOut - 19, C.tanhW, 'th', t.out,
+    `out = tanh(${fmt(pre)}) = ${fmt(t.out.data)}. ∇out пришёл «сверху»: ${l === lastLayer() ? 'прямо из loss: 2·(out − цель)' : 'сумма вкладов от всех нейронов следующего слоя'} = ${fmt(t.out.grad, 4)}.`);
+  links += link(C.sum + C.opW, yOut, C.tanh, yOut);
+
+  svg.innerHTML = `<defs><marker id="arr" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="${cssVar('--ink-3')}"/></marker></defs>${links}${boxes}
+    <text class="lbl" x="${C.tanh}" y="${yOut + 34}">→ ${l === lastLayer() ? 'в loss' : 'в следующий слой'}</text>`;
+
+  svg.querySelectorAll('.box').forEach((b) => {
+    b.addEventListener('mouseenter', (ev) => showTip(ev, b.dataset.tip));
+    b.addEventListener('mousemove', moveTip);
+    b.addEventListener('mouseleave', hideTip);
+  });
+}
+
+// ---------- 5. обучение: график loss ----------
+function renderChart() {
+  const svg = $('chart');
+  const h = S.history;
+  const W = 420, H = 200, P = { l: 46, r: 12, t: 10, b: 24 };
+  if (!h.length) {
+    svg.innerHTML = `<text x="${W / 2}" y="${H / 2}" text-anchor="middle" fill="${cssVar('--ink-3')}" font-size="12">Сеть ещё не обучали: веса случайные</text>`;
+    return;
+  }
+  const losses = h.map((r) => r.loss);
+  const lo = Math.floor(Math.log10(Math.min(...losses))), hi = Math.ceil(Math.log10(Math.max(...losses)));
+  const top = hi === lo ? hi + 1 : hi;
+  const xMax = Math.max(2, h[h.length - 1].epoch);
+  const X = (e) => P.l + (e - 1) / (xMax - 1) * (W - P.l - P.r);
+  const Y = (v) => P.t + (top - Math.log10(v)) / (top - lo) * (H - P.t - P.b);
+
+  let grid = '', axis = '';
+  for (let p = lo; p <= top; p++) {
+    grid += `<line x1="${P.l}" x2="${W - P.r}" y1="${Y(10 ** p)}" y2="${Y(10 ** p)}"/>`;
+    axis += `<text x="${P.l - 6}" y="${Y(10 ** p) + 3}" text-anchor="end">${10 ** p >= 1 ? 10 ** p : (10 ** p).toFixed(-p)}</text>`;
+  }
+  const ticks = 5;
+  for (let j = 0; j <= ticks; j++) {
+    const e = Math.round(1 + (xMax - 1) * j / ticks);
+    axis += `<text x="${X(e)}" y="${H - 6}" text-anchor="middle">${e}</text>`;
+  }
+  // прореживаем точки, чтобы путь не был огромным
+  const stride = Math.max(1, Math.floor(h.length / 400));
+  let d = '';
+  for (let j = 0; j < h.length; j += stride) d += (d ? 'L' : 'M') + X(h[j].epoch).toFixed(1) + ',' + Y(h[j].loss).toFixed(1);
+  const last = h[h.length - 1];
+  d += 'L' + X(last.epoch).toFixed(1) + ',' + Y(last.loss).toFixed(1);
+
+  svg.innerHTML = `<g class="grid">${grid}</g><g class="axis">${axis}</g>
+    <path class="series" d="${d}"/>
+    <line class="cross" id="cross" y1="${P.t}" y2="${H - P.b}" visibility="hidden"/>
+    <circle class="dot" id="cross-dot" r="4.5" visibility="hidden"/>
+    <rect id="chart-hit" x="${P.l}" y="0" width="${W - P.l - P.r}" height="${H}" fill="transparent"/>`;
+
+  const tip = $('chart-tip');
+  const hit = $('chart-hit');
+  hit.addEventListener('mousemove', (ev) => {
+    const r = svg.getBoundingClientRect();
+    const sx = (ev.clientX - r.left) / r.width * W;
+    const e = Math.round(1 + (sx - P.l) / (W - P.l - P.r) * (xMax - 1));
+    const row = h[Math.max(0, Math.min(h.length - 1, e - h[0].epoch))];
+    const cx = X(row.epoch), cyv = Y(row.loss);
+    $('cross').setAttribute('x1', cx); $('cross').setAttribute('x2', cx); $('cross').setAttribute('visibility', 'visible');
+    const dot = $('cross-dot'); dot.setAttribute('cx', cx); dot.setAttribute('cy', cyv); dot.setAttribute('visibility', 'visible');
+    tip.hidden = false;
+    tip.innerHTML = `эпоха ${row.epoch}<br>loss ${row.loss.toFixed(4)}<br>угадано ${Math.round(row.accuracy * 10)}/10`;
+    const px = cx / W * r.width, py = cyv / H * r.height;
+    tip.style.left = Math.min(px + 12, r.width - 120) + 'px';
+    tip.style.top = Math.max(0, py - 60) + 'px';
+  });
+  hit.addEventListener('mouseleave', () => {
+    tip.hidden = true;
+    $('cross').setAttribute('visibility', 'hidden'); $('cross-dot').setAttribute('visibility', 'hidden');
+  });
+}
+
+function renderStats() {
+  const last = S.history[S.history.length - 1];
+  $('st-epoch').textContent = S.epoch;
+  $('st-loss').textContent = last ? last.loss.toFixed(4) : '–';
+  $('st-acc').textContent = last ? `${Math.round(last.accuracy * 10)}/10` : '–';
+}
+
+// ---------- подсказки ----------
+function showTip(ev, text) { const t = $('tip'); t.textContent = text; t.hidden = false; moveTip(ev); }
+function moveTip(ev) {
+  const t = $('tip');
+  const x = Math.min(ev.clientX + 14, window.innerWidth - t.offsetWidth - 8);
+  t.style.left = x + 'px'; t.style.top = (ev.clientY + 14) + 'px';
+}
+function hideTip() { $('tip').hidden = true; }
+
+// ---------- обновление ----------
+async function refresh() {
+  S.fwd = await api('forward', { x: S.x, target: S.target });
+  renderTemplate(); renderNet(); renderOutputs(); renderNeuron();
+}
+
+function setBusy(b) {
+  S.busy = b;
+  ['btn-step', 'btn-50', 'btn-200', 'btn-reset'].forEach((id) => { $(id).disabled = b; });
+}
+
+function setMode(m) {
+  S.mode = m;
+  document.querySelectorAll('#mode button').forEach((b) => b.classList.toggle('on', b.dataset.mode === m));
+  renderNet();
+}
+
+async function trainEpochs(total) {
+  setBusy(true);
+  try {
+    const lr = parseFloat($('lr').value) || S.lr;
+    for (let done = 0; done < total; done += 50) {
+      const r = await api('train', { epochs: Math.min(50, total - done), lr });
+      S.history.push(...r.log);
+      S.params = r.params; S.epoch = r.epoch;
+      renderChart(); renderStats();
+    }
+    await refresh();
+  } finally { setBusy(false); }
+}
+
+/** Одна эпоха, разобранная по стадиям прямо на схеме сети */
+async function trainStepAnimated() {
+  setBusy(true);
+  const prevMode = S.mode;
+  const net = $('net');
+  const phases = [...document.querySelectorAll('#phases li')];
+  const phase = (key, text) => {
+    let seen = true;
+    phases.forEach((li) => {
+      const on = li.dataset.p === key;
+      li.classList.toggle('on', on);
+      li.classList.toggle('done', seen && !on);
+      if (on) seen = false;
+    });
+    $('phase-text').innerHTML = text;
+    const banner = $('net-phase');
+    banner.hidden = false;
+    banner.innerHTML = `<b>${phases.findIndex((li) => li.dataset.p === key) + 1}/5 · ${key === 'zero' ? 'zero_grad' : key}</b> ${text}`;
+  };
+  const light = async (order) => {
+    net.classList.add('phase');
+    for (const c of order) {
+      net.querySelector(`.layer[data-c="${c}"]`).classList.add('lit');
+      await sleep(380);
+    }
+  };
+  const cols = [...Array(S.sizes.length).keys()];
+
+  try {
+    const lr = parseFloat($('lr').value) || S.lr;
+    const r = await api('train', { epochs: 1, lr });
+    const loss = r.log[0].loss;
+
+    // 1. forward
+    S.paramsView = r.before;
+    setMode('signal');
+    phase('forward', 'Все 10 цифр по очереди проходят через сеть слева направо. На схеме — путь текущего входа: каждый нейрон считает tanh(b + Σ w·x) и передаёт результат дальше.');
+    await light(cols);
+    await sleep(300);
+
+    // 2. loss
+    phase('loss', `Выходы всех 10 примеров сравниваются с целью (+1 у правильной цифры, −1 у остальных): loss = ¹⁄₁₀ Σ (выход − цель)² = <b>${loss.toFixed(4)}</b>. Это один узел <code>Value</code> — корень графа.`);
+    $('out-card').classList.add('flash');
+    await sleep(1300);
+    $('out-card').classList.remove('flash');
+
+    // 3. zero_grad
+    S.gradsView = r.grads.map((layer) => layer.map((nr) => ({ w: nr.w.map(() => 0), b: 0 })));
+    net.classList.remove('phase');
+    setMode('grads');
+    phase('zero', 'Перед backward все grad обнуляются, иначе к ним прибавились бы градиенты прошлой эпохи (grad += …). Все связи стали серыми: градиентов пока нет.');
+    await sleep(1400);
+
+    // 4. backward
+    S.gradsView = r.grads;
+    renderNet();
+    phase('backward', '<code>loss.backward()</code>: grad = 1 в корне, дальше по графу справа налево. Каждый узел раздаёт свой grad родителям по цепному правилу. Толстые связи — веса, которые сильнее всего влияют на loss.');
+    net.querySelectorAll('.layer').forEach((g) => g.classList.remove('lit'));
+    await light([...cols].reverse());
+    await sleep(500);
+
+    // 5. update — плавно ведём веса от старых к новым
+    net.classList.remove('phase');
+    setMode('weights');
+    let maxD = 0, where = '';
+    r.params.forEach((layer, l) => layer.forEach((nr, n) => nr.w.forEach((w, i) => {
+      const dlt = Math.abs(w - r.before[l][n].w[i]);
+      if (dlt > maxD) { maxD = dlt; where = `${inputName(l, i)} → ${neuronName(l, n)}`; }
+    })));
+    phase('update', `Каждый вес сдвигается против своего градиента: <code>w −= ${lr} · ∇w</code>. Сильнее всего изменился вес ${where}: на ${maxD.toFixed(4)}. Новые веса сохранены в SQLite.`);
+    const frames = 24;
+    for (let f = 1; f <= frames; f++) {
+      const t = f / frames;
+      S.paramsView = r.before.map((layer, l) => layer.map((nr, n) => ({
+        w: nr.w.map((w, i) => w + (r.params[l][n].w[i] - w) * t),
+        b: nr.b + (r.params[l][n].b - nr.b) * t,
+      })));
+      renderNet();
+      await sleep(40);
+    }
+
+    S.params = r.params; S.epoch = r.epoch; S.history.push(...r.log);
+    renderChart(); renderStats();
+    await sleep(900);
+    phases.forEach((li) => { li.classList.remove('on'); li.classList.add('done'); });
+  } finally {
+    $('net-phase').hidden = true;
+    S.paramsView = null; S.gradsView = null;
+    net.classList.remove('phase');
+    net.querySelectorAll('.layer').forEach((g) => g.classList.remove('lit'));
+    S.mode = prevMode;
+    await refresh();
+    setMode(prevMode);
+    setBusy(false);
+  }
+}
+
+// ---------- старт ----------
+async function init() {
+  const st = await api('state');
+  Object.assign(S, st);
+  S.x = [...st.digits[0]];
+  S.sel = { l: st.sizes.length - 2, n: 0 };
+  $('arch').textContent = st.sizes.join(' → ');
+  $('lr').value = st.lr;
+
+  $('digit-buttons').innerHTML = Object.keys(st.digits).map((d) => `<button data-d="${d}">${d}</button>`).join('');
+  document.querySelectorAll('#digit-buttons button').forEach((b) => b.addEventListener('click', () => {
+    if (S.busy) return;
+    S.x = [...S.digits[b.dataset.d]];
+    S.target = null;
+    S.sel = { l: S.sizes.length - 2, n: +b.dataset.d };
+    refresh();
+  }));
+  document.querySelectorAll('#mode button').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
+  $('target').addEventListener('change', (e) => { S.target = e.target.value === '' ? null : +e.target.value; refresh(); });
+  $('btn-step').addEventListener('click', trainStepAnimated);
+  $('btn-50').addEventListener('click', () => trainEpochs(50));
+  $('btn-200').addEventListener('click', () => trainEpochs(200));
+  $('btn-reset').addEventListener('click', async () => {
+    setBusy(true);
+    try {
+      const r = await api('reset', {});
+      S.params = r.params; S.epoch = 0; S.history = [];
+      renderChart(); renderStats();
+      document.querySelectorAll('#phases li').forEach((li) => li.classList.remove('on', 'done'));
+      $('phase-text').textContent = 'Веса снова случайные. Попробуйте «1 шаг с разбором» или «+200 эпох».';
+      await refresh();
+    } finally { setBusy(false); }
+  });
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { renderNet(); renderOutputs(); renderNeuron(); renderChart(); });
+
+  renderChart(); renderStats();
+  await refresh();
+}
+
+init().catch((e) => {
+  document.querySelector('main').insertAdjacentHTML('afterbegin', `<div class="card" style="color:var(--neg)">Ошибка: ${e.message}</div>`);
+});

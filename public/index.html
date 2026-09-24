@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Micrograd: цифры индекса</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1>Micrograd на PHP: какая цифра индекса?</h1>
+  <p class="lead">9 палочек шаблона почтового индекса → нейросеть <span id="arch"></span> → 10 нейронов-цифр.
+    Весь граф считается классом <code>Value</code> из видео Карпатого, веса лежат в SQLite.</p>
+</header>
+
+<main>
+  <section class="row row1">
+    <!-- 1. Вход -->
+    <article class="card" id="input-card">
+      <h2><span class="num">1</span> Вход: палочки</h2>
+      <p class="hint">Кликайте по палочкам, чтобы включать и выключать их.</p>
+      <svg id="template" viewBox="-34 -22 168 290" role="img" aria-label="Шаблон цифры индекса"></svg>
+      <div class="digit-buttons" id="digit-buttons"></div>
+      <div class="vec">
+        <div><span class="muted">палочки</span> <code id="vec-raw"></code></div>
+        <div><span class="muted">в сеть&nbsp;&nbsp;</span> <code id="vec-enc"></code></div>
+        <p class="hint">Нет палочки → −1, есть → +1. Так «пустая» палочка тоже несёт информацию.</p>
+      </div>
+    </article>
+
+    <!-- 2. Сеть -->
+    <article class="card" id="net-card">
+      <div class="card-head">
+        <h2><span class="num">2</span> Сеть</h2>
+        <div class="seg" role="tablist" id="mode">
+          <button data-mode="signal" class="on" title="w·x для текущего входа: что реально течёт по связи">Сигнал w·x</button>
+          <button data-mode="weights" title="Сами веса w">Веса w</button>
+          <button data-mode="grads" title="∂loss/∂w: куда и насколько надо сдвинуть вес">Градиенты ∇w</button>
+        </div>
+      </div>
+      <p class="hint" id="mode-hint"></p>
+      <div class="net-phase" id="net-phase" hidden></div>
+      <svg id="net" viewBox="0 0 760 500" role="img" aria-label="Схема нейросети"></svg>
+      <div class="legend">
+        <span><i class="sw neg"></i> отрицательное</span>
+        <span><i class="sw zero"></i> около нуля</span>
+        <span><i class="sw pos"></i> положительное</span>
+        <span class="muted">толщина связи = величина · круг = выход нейрона tanh ∈ [−1, 1] · клик по нейрону = под лупу</span>
+      </div>
+    </article>
+
+    <!-- 3. Выход -->
+    <article class="card" id="out-card">
+      <h2><span class="num">3</span> Выход</h2>
+      <div class="answer">Сеть думает: <b id="answer">?</b></div>
+      <div id="bars"></div>
+      <label class="target">Правильный ответ
+        <select id="target"></select>
+      </label>
+      <p class="hint">Для правильной цифры хотим +1, для остальных −1.
+        loss = Σ (выход − цель)² = <b id="loss-one">–</b></p>
+    </article>
+  </section>
+
+  <section class="row row2">
+    <!-- 4. Нейрон под лупой -->
+    <article class="card" id="neuron-card">
+      <div class="card-head">
+        <h2><span class="num">4</span> Нейрон под лупой: <span id="neuron-name"></span></h2>
+      </div>
+      <p class="formula" id="neuron-formula"></p>
+      <p class="hint">Это граф <code>Value</code> ровно в том виде, в каком его строит <code>Neuron::__invoke</code>:
+        каждое <code>mul</code>/<code>add</code>/<code>tanh</code> создаёт новый узел.
+        <b>data</b> считается слева направо (forward), <b>∇ grad</b> справа налево (<code>backward()</code>) от loss текущего примера.
+        Наведите на узел, чтобы увидеть правило.</p>
+      <div class="graph-wrap"><svg id="graph" role="img" aria-label="Граф вычислений нейрона"></svg></div>
+    </article>
+
+    <!-- 5. Обучение -->
+    <article class="card" id="train-card">
+      <h2><span class="num">5</span> Обучение</h2>
+      <div class="stats">
+        <div><span class="muted">эпоха</span><b id="st-epoch">0</b></div>
+        <div><span class="muted">loss</span><b id="st-loss">–</b></div>
+        <div><span class="muted">угадано</span><b id="st-acc">–</b></div>
+      </div>
+      <div class="controls">
+        <label>lr <input id="lr" type="number" step="0.05" min="0.01" max="2" value="0.3"></label>
+        <button id="btn-step" class="primary">1 шаг с разбором</button>
+        <button id="btn-50">+50 эпох</button>
+        <button id="btn-200">+200 эпох</button>
+        <button id="btn-reset" class="danger">Сбросить веса</button>
+      </div>
+      <ol class="phases" id="phases">
+        <li data-p="forward"><b>forward</b> все 10 цифр через сеть</li>
+        <li data-p="loss"><b>loss</b> = среднее Σ(выход − цель)²</li>
+        <li data-p="zero"><b>zero_grad</b> все grad = 0</li>
+        <li data-p="backward"><b>backward</b> grad от loss к каждому весу</li>
+        <li data-p="update"><b>update</b> w −= lr · ∇w</li>
+      </ol>
+      <p class="phase-text" id="phase-text">Нажмите «1 шаг с разбором»: одна эпоха по всем 10 цифрам покажет все пять стадий на схеме сети.</p>
+      <h3>loss по эпохам <span class="muted">(лог. шкала)</span></h3>
+      <div class="chart-wrap"><svg id="chart" viewBox="0 0 420 200" role="img" aria-label="График loss по эпохам"></svg>
+        <div class="tip" id="chart-tip" hidden></div></div>
+    </article>
+  </section>
+
+  <section class="card explain">
+    <h2>Как это работает, коротко</h2>
+    <ol>
+      <li><b>Value.</b> Каждое число в сети — объект <code>Value</code>: он хранит <code>data</code>, <code>grad</code> и помнит, из каких узлов и какой операцией получен.</li>
+      <li><b>Нейрон</b> считает <code>tanh(b + w₁x₁ + … + wₙxₙ)</code>. Слой — это несколько нейронов на одном входе. MLP — слои друг за другом: выход одного слоя становится входом следующего.</li>
+      <li><b>Loss</b> — одно число: насколько выходы далеки от цели (+1 у правильной цифры, −1 у остальных). Чем меньше, тем лучше.</li>
+      <li><b>backward()</b> обходит граф от loss назад и по цепному правилу для каждого узла считает <code>grad</code>: как изменится loss, если чуть увеличить этот узел. У <code>+</code> градиент проходит как есть, у <code>×</code> умножается на «соседа», у <code>tanh</code> — на (1 − tanh²).</li>
+      <li><b>Update:</b> каждый вес сдвигаем против своего градиента: <code>w −= lr · grad</code>. Повторяем много эпох, loss падает, и сеть начинает правильно угадывать цифры. Веса после обучения сохраняются в <code>data/micrograd.sqlite</code>.</li>
+    </ol>
+  </section>
+</main>
+
+<div class="tip" id="tip" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
