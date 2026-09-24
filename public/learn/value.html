@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Урок 1: Value</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="learn.css">
+</head>
+<body>
+<main class="lesson">
+  <header>
+    <div class="kicker">Урок 1 из 8</div>
+    <h1>Value — число, которое помнит, откуда оно взялось</h1>
+    <p>Обычное число после <code>$c = $a * $b</code> — просто 6, откуда оно взялось, уже не узнать.
+      <code>Value</code> хранит результат и вдобавок помнит, из каких чисел и какой операцией его получили.
+      Из этих связей складывается <b>граф вычислений</b>. По нему потом можно пройти назад и узнать, как каждое число влияет на результат.</p>
+  </header>
+
+  <section class="card">
+    <h2>Пример из видео: L = (a · b + c) · f</h2>
+    <p>Двигайте ползунки: граф пересчитывается слева направо (это <b>forward</b>). Кликните по любому прямоугольнику, чтобы увидеть, что лежит внутри объекта.</p>
+    <div id="sl"></div>
+    <div class="graph-box"><svg id="g"></svg></div>
+    <div class="two" style="margin-top:12px">
+      <div>
+        <h2>Обратный проход по шагам</h2>
+        <div id="steps"></div>
+        <div class="say" id="say"></div>
+      </div>
+      <div>
+        <h2>Внутри выбранного Value</h2>
+        <div class="obj" id="obj"></div>
+        <p class="note">Прямоугольник на графе — объект <code>Value</code>. Кружок — операция, которая его породила.
+          У листьев (a, b, c, f) операции нет: это исходные числа.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="two-wide">
+    <article class="card">
+      <h2>Код: что именно выполняется на этом шаге</h2>
+      <div id="code"></div>
+    </article>
+    <article class="card">
+      <h2>Что такое grad «на пальцах»</h2>
+      <p><b>grad</b> узла — насколько изменится L, если чуть-чуть увеличить этот узел.
+        Проверим без всякого backward: прибавим к каждому листу h = 0.001 и посмотрим, как сдвинулся L.</p>
+      <table class="t" id="num"></table>
+      <p class="note">Числа совпадают: backward вычисляет ровно это, только сразу для всех узлов за один проход,
+        без того чтобы пересчитывать L по разу на каждый вес.</p>
+    </article>
+  </section>
+
+  <section class="card retell">
+    <h2>Как объяснить другому</h2>
+    <ol>
+      <li>Value — обёртка над числом. Внутри <code>data</code> (само число), <code>prev</code> (из чего получено), <code>op</code> (как) и <code>grad</code>.</li>
+      <li>Каждая операция (<code>add</code>, <code>mul</code>, <code>tanh</code>) возвращает новый Value и оставляет ему «инструкцию на обратный путь» — функцию <code>backwardFn</code>.</li>
+      <li><code>grad</code> отвечает на вопрос: «если это число чуть увеличить, как изменится итог?» Знак показывает направление, величина — силу влияния.</li>
+      <li><code>backward()</code> ставит итогу <code>grad = 1</code> и вызывает инструкции в обратном порядке, так что градиент протекает от итога к каждому листу.</li>
+    </ol>
+  </section>
+  <nav class="pager" id="pager"></nav>
+</main>
+<script src="../nav.js"></script>
+<script src="engine.js"></script>
+<script>
+const CODE = `
+final class Value
+{
+    public float $data;         // само число
+    public float $grad = 0.0;   // ∂L/∂(это число), заполняется в backward()
+    public array $prev;         // из каких Value получено
+    public string $op;          // какой операцией: '+', '*', 'tanh'
+
+    public function add(Value $other): Value
+    {
+        $out = new Value($this->data + $other->data, [$this, $other], '+');
+        $out->backwardFn = function () use ($out, $other) {
+            $this->grad  += $out->grad;
+            $other->grad += $out->grad;
+        };
+        return $out;
+    }
+
+    public function mul(Value $other): Value
+    {
+        $out = new Value($this->data * $other->data, [$this, $other], '*');
+        $out->backwardFn = function () use ($out, $other) {
+            $this->grad  += $other->data * $out->grad;
+            $other->grad += $this->data * $out->grad;
+        };
+        return $out;
+    }
+
+    public function backward(): void
+    {
+        $topo = /* все узлы: каждый после своих родителей */;
+        $this->grad = 1.0;
+        foreach (array_reverse($topo) as $node) {
+            ($node->backwardFn)();
+        }
+    }
+}`;
+
+let S = { a: 2, b: -3, c: 10, f: -2 };
+let graph, stepper, sel = null, k = 0;
+
+function build(vals) {
+  const a = new V(vals.a, [], '', 'a'), b = new V(vals.b, [], '', 'b');
+  const c = new V(vals.c, [], '', 'c'), f = new V(vals.f, [], '', 'f');
+  const e = a.mul(b); e.label = 'e = a·b';
+  const d = e.add(c); d.label = 'd = e + c';
+  const L = d.mul(f); L.label = 'L = d·f';
+  return { a, b, c, f, e, d, L };
+}
+const short = (v) => v.label.split(' ')[0];
+
+function render() {
+  stepper.go(k);
+  const info = stepper.info;
+  const recv = new Set(info ? info.node.prev : []);
+  drawGraph($('g'), graph.L, {
+    active: info?.node ?? (k === 1 ? graph.L : null), recv, sel,
+    onClick: (v) => { sel = v; render(); },
+    explain: (v) => `<b>${esc(v.label)}</b><br>data = ${f3(v.data)}<br>grad = ${f3(v.grad)}${v.prev.length ? '' : '<br>лист: исходное число'}`,
+  });
+  $('say').innerHTML = stepper.explain(short);
+  ctl.count.textContent = `шаг ${k} из ${stepper.total}`;
+
+  // подсветка кода
+  let hl = [];
+  if (k === 0) hl = [[10], [20]];
+  else if (k === 1) hl = [[31]];
+  else if (info.node.op === '+') hl = [[11, 14]];
+  else if (info.node.op === '*') hl = [[21, 24]];
+  if (k >= 2) hl.push([33]);
+  renderCode($('code'), CODE, hl);
+
+  const v = sel ?? graph.L;
+  $('obj').innerHTML = `<span class="f">$${esc(short(v))} = </span>Value {<br>
+    &nbsp;&nbsp;<span class="f">data</span> = ${f3(v.data)}<br>
+    &nbsp;&nbsp;<span class="f">grad</span> = ${f3(v.grad)}<br>
+    &nbsp;&nbsp;<span class="f">prev</span> = [${v.prev.map((p) => esc(short(p))).join(', ')}]<br>
+    &nbsp;&nbsp;<span class="f">op</span> &nbsp;&nbsp;= '${v.op}'<br>}`;
+}
+
+function numeric() {
+  const h = 0.001;
+  const L0 = build(S).L.data;
+  const G = build(S); G.L.backward();
+  let rows = '<tr><th>лист</th><th>grad (backward)</th><th>(L(x+h) − L(x)) / h</th></tr>';
+  for (const name of ['a', 'b', 'c', 'f']) {
+    const L1 = build({ ...S, [name]: S[name] + h }).L.data;
+    rows += `<tr><td class="mono">${name}</td><td>${f3(G[name].grad)}</td><td>${f3((L1 - L0) / h)}</td></tr>`;
+  }
+  $('num').innerHTML = rows;
+}
+
+function rebuild() {
+  graph = build(S);
+  stepper = new BackwardStepper(graph.L);
+  sel = sel ? graph[Object.keys(graph).find((key) => graph[key].label === sel.label)] : null;
+  render(); numeric();
+}
+
+const ctl = stepperControls($('steps'), (a) => {
+  if (a === 'reset') k = 0; else if (a === 'prev') k = Math.max(0, k - 1);
+  else if (a === 'next') k = Math.min(stepper.total, k + 1); else k = stepper.total;
+  render();
+});
+sliders('sl', [
+  { name: 'a', min: -5, max: 5, value: S.a }, { name: 'b', min: -5, max: 5, value: S.b },
+  { name: 'c', min: -10, max: 10, value: S.c }, { name: 'f', min: -5, max: 5, value: S.f },
+], (vals) => { S = { ...vals }; rebuild(); });
+rebuild();
+</script>
+</body>
+</html>

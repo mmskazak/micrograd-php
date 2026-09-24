@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Урок 3: Слой</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="learn.css">
+</head>
+<body>
+<main class="lesson">
+  <header>
+    <div class="kicker">Урок 3 из 8</div>
+    <h1>Слой: несколько нейронов смотрят на один и тот же вход</h1>
+    <p>Слой — это просто массив нейронов. Каждый получает <b>весь</b> входной вектор целиком, но у каждого свои веса,
+      поэтому каждый замечает в одном и том же входе что-то своё. Выход слоя — массив ответов всех нейронов.
+      Два числа задают слой: <code>nin</code> — сколько чисел на входе (одинаково для всех нейронов) и
+      <code>nout</code> — сколько нейронов, то есть сколько чисел на выходе.</p>
+  </header>
+
+  <section class="card">
+    <h2>Вход x (nin = 3)</h2>
+    <div id="sl"></div>
+    <div class="stepper"><span>nout (нейронов в слое):</span><span id="nout"></span></div>
+    <div class="two-wide">
+      <div><svg id="diagram" style="width:100%;height:auto"></svg></div>
+      <div>
+        <table class="t" id="tbl"></table>
+        <div class="say" id="outvec" style="margin-top:10px"></div>
+      </div>
+    </div>
+    <p class="note">Наведите на нейрон или строку таблицы: подсветятся именно его связи. Все нейроны получают одни и те же x₁, x₂, x₃.</p>
+  </section>
+
+  <section class="two">
+    <article class="card">
+      <h2>Код слоя</h2>
+      <div id="code"></div>
+    </article>
+    <article class="card">
+      <h2>Сколько параметров в слое</h2>
+      <p>У каждого нейрона <code>nin</code> весов и один bias, значит у слоя <b>nout × (nin + 1)</b> параметров.</p>
+      <div class="say" id="count"></div>
+      <h2 style="margin-top:14px">В нашем проекте</h2>
+      <table class="t">
+        <tr><th>слой</th><th>nin → nout</th><th>параметров</th></tr>
+        <tr><td>скрытый 1</td><td>9 → 12</td><td>12 × (9 + 1) = 120</td></tr>
+        <tr><td>скрытый 2</td><td>12 → 8</td><td>8 × (12 + 1) = 104</td></tr>
+        <tr><td>выход</td><td>8 → 10</td><td>10 × (8 + 1) = 90</td></tr>
+        <tr><td><b>всего</b></td><td></td><td><b>314</b></td></tr>
+      </table>
+      <p class="note">Ровно столько строк лежит в таблице <code>params</code> в SQLite.</p>
+    </article>
+  </section>
+
+  <section class="card retell">
+    <h2>Как объяснить другому</h2>
+    <ol>
+      <li>Слой — несколько нейронов бок о бок. Вход у всех один, веса у каждого свои.</li>
+      <li>Каждый нейрон — отдельный «детектор»: один реагирует на одну комбинацию входов, другой на другую.</li>
+      <li>Выход слоя — массив длины <code>nout</code>, по числу на нейрон. Этот массив станет входом следующего слоя.</li>
+      <li>Нейроны в слое не знают друг о друге и не обмениваются данными. Это просто цикл <code>foreach</code>.</li>
+    </ol>
+  </section>
+  <nav class="pager" id="pager"></nav>
+</main>
+<script src="../nav.js"></script>
+<script src="engine.js"></script>
+<script>
+renderCode($('code'), `
+final class Layer
+{
+    public array $neurons;
+
+    public function __construct(int $nin, int $nout)
+    {
+        for ($i = 0; $i < $nout; $i++) {
+            $this->neurons[] = new Neuron($nin);   // у каждого свои случайные веса
+        }
+    }
+
+    public function __invoke(array $x): array
+    {
+        $outs = [];
+        foreach ($this->neurons as $neuron) {
+            $outs[] = $neuron($x);                 // ОДИН И ТОТ ЖЕ $x для всех
+        }
+        return $outs;                              // nout чисел
+    }
+}`, [[15, 19]]);
+
+let X = { x1: 1, x2: -0.5, x3: 0.7 };
+let nout = 4, hover = -1, layer, outs;
+
+function build() {
+  layer = new Layer(3, nout, rng(7));
+  const xs = [X.x1, X.x2, X.x3].map((v, i) => new V(v, [], '', 'x' + (i + 1)));
+  outs = layer.call(xs);
+}
+
+function render() {
+  const H = Math.max(220, nout * 64 + 30), W = 520;
+  const inY = (i) => H / 2 + (i - 1) * 70;
+  const nY = (j) => H / 2 + (j - (nout - 1) / 2) * 64;
+  let h = '';
+  layer.neurons.forEach((n, j) => {
+    n.w.forEach((w, i) => {
+      const t = Math.min(1, Math.abs(w.data));
+      const on = hover === -1 || hover === j;
+      h += `<path d="M62,${inY(i)} C180,${inY(i)} 220,${nY(j)} 318,${nY(j)}" fill="none" stroke="${cssVar(w.data >= 0 ? '--pos' : '--neg')}"
+        stroke-width="${0.8 + 4 * t}" opacity="${on ? 0.25 + 0.75 * t : 0.06}"/>`;
+    });
+  });
+  [X.x1, X.x2, X.x3].forEach((v, i) => {
+    h += `<circle cx="40" cy="${inY(i)}" r="22" fill="${cssVar('--bg')}" stroke="${cssVar('--ink-3')}"/>
+      <text x="40" y="${inY(i) - 6}" text-anchor="middle" font-size="11" fill="${cssVar('--ink-3')}">x${i + 1}</text>
+      <text x="40" y="${inY(i) + 8}" text-anchor="middle" font-size="12" font-weight="700" fill="${cssVar('--ink')}">${f2(v)}</text>`;
+  });
+  outs.forEach((o, j) => {
+    h += `<g class="nrn" data-j="${j}" style="cursor:pointer">
+      <circle cx="340" cy="${nY(j)}" r="22" fill="${cssVar('--surface')}" stroke="${cssVar(hover === j ? '--hi' : '--ink-3')}" stroke-width="${hover === j ? 3 : 1}"/>
+      <text x="340" y="${nY(j) - 6}" text-anchor="middle" dominant-baseline="central" font-size="9" fill="${cssVar('--ink-3')}">нейрон</text>
+      <text x="340" y="${nY(j) + 7}" text-anchor="middle" dominant-baseline="central" font-size="13" font-weight="700" fill="${cssVar('--ink')}">${j + 1}</text>
+      <line x1="362" y1="${nY(j)}" x2="430" y2="${nY(j)}" stroke="${cssVar('--ink-3')}"/>
+      <rect x="430" y="${nY(j) - 15}" width="70" height="30" rx="6" fill="${cssVar(o.data >= 0 ? '--pos' : '--neg')}" opacity="${0.25 + 0.75 * Math.abs(o.data)}"/>
+      <text x="465" y="${nY(j)}" text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="700" fill="${cssVar('--ink')}">${f3(o.data)}</text></g>`;
+  });
+  const svg = $('diagram');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.innerHTML = h;
+  svg.querySelectorAll('.nrn').forEach((g) => {
+    g.addEventListener('mouseenter', () => { if (hover !== +g.dataset.j) { hover = +g.dataset.j; render(); } });
+    g.addEventListener('mouseleave', (ev) => { if (!ev.relatedTarget?.closest?.('.nrn')) { hover = -1; render(); } });
+  });
+
+  let t = '<tr><th>нейрон</th><th>w₁</th><th>w₂</th><th>w₃</th><th>b</th><th>out</th></tr>';
+  layer.neurons.forEach((n, j) => {
+    t += `<tr data-j="${j}" class="${hover === j ? 'hl' : ''}"><td>${j + 1}</td>${n.w.map((w) => `<td>${f2(w.data)}</td>`).join('')}<td>${f2(n.b.data)}</td><td><b>${f3(outs[j].data)}</b></td></tr>`;
+  });
+  $('tbl').innerHTML = t;
+  $('tbl').querySelectorAll('tr[data-j]').forEach((tr) => {
+    tr.addEventListener('mouseenter', () => { if (hover !== +tr.dataset.j) { hover = +tr.dataset.j; render(); } });
+  });
+  $('tbl').onmouseleave = () => { hover = -1; render(); };
+
+  $('outvec').innerHTML = `<b>Выход слоя</b> — массив из ${nout} чисел:<br><code>[${outs.map((o) => f3(o.data)).join(', ')}]</code><br>
+    Если после этого слоя идёт ещё один, для него это будет x.`;
+  $('count').innerHTML = `Сейчас: ${nout} × (3 + 1) = <b>${nout * 4}</b> параметров
+    (${nout * 3} весов и ${nout} bias).`;
+}
+
+$('nout').innerHTML = [1, 2, 3, 4, 5].map((n) => `<button data-n="${n}"${n === nout ? ' class="primary"' : ''}>${n}</button>`).join(' ');
+$('nout').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+  nout = +b.dataset.n;
+  $('nout').querySelectorAll('button').forEach((x) => x.classList.toggle('primary', x === b));
+  build(); render();
+}));
+sliders('sl', [
+  { name: 'x1', label: 'x₁', min: -1, max: 1, value: X.x1 }, { name: 'x2', label: 'x₂', min: -1, max: 1, value: X.x2 },
+  { name: 'x3', label: 'x₃', min: -1, max: 1, value: X.x3 },
+], (v) => { X = { ...v }; build(); render(); });
+build(); render();
+</script>
+</body>
+</html>

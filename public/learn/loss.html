@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Урок 5: Loss</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="learn.css">
+</head>
+<body>
+<main class="lesson">
+  <header>
+    <div class="kicker">Урок 5 из 8</div>
+    <h1>Loss: одно число «насколько сеть ошибается»</h1>
+    <p>Чтобы учить сеть, нужна одна цифра-оценка: чем она меньше, тем лучше сеть отвечает.
+      Берём каждый пример, смотрим, насколько ответ сети отличается от правильного, возводим разницу в квадрат и складываем.
+      Получается <code>loss = Σ (ypred − y)²</code>. Дальше разберём, почему именно так.</p>
+  </header>
+
+  <section class="card">
+    <h2>Датасет из видео и сеть MLP(3, [4, 4, 1]) со случайными весами</h2>
+    <div class="two-wide">
+      <div>
+        <table class="t" id="tbl"></table>
+        <div class="say" id="sum" style="margin-top:10px"></div>
+      </div>
+      <div><svg id="lines" style="width:100%;height:auto"></svg>
+        <p class="note">Кружок — ответ сети, ромб — правильный ответ. Красный отрезок — ошибка.
+          Квадрат справа — ошибка в квадрате: его площадь и есть вклад примера в loss.</p></div>
+    </div>
+    <div class="stepper"><button id="reroll">другие случайные веса</button><button id="train" class="primary">немного обучить (20 шагов)</button></div>
+  </section>
+
+  <section class="two">
+    <article class="card">
+      <h2>Почему квадрат, а не просто разница?</h2>
+      <svg id="sq" viewBox="0 0 460 260" style="width:100%;height:auto"></svg>
+      <ol>
+        <li><b>Знаки не гасят друг друга.</b> Ошибки +0.5 и −0.5 в сумме дают 0, будто сеть идеальна. Квадраты дают 0.25 + 0.25 = 0.5.
+          Сейчас в таблице сумма разниц без квадрата = <b id="rawsum"></b>, а честный loss = <b id="sqsum"></b>.</li>
+        <li><b>Большие ошибки штрафуются сильнее.</b> Ошибка в 2 раза больше даёт штраф в 4 раза больше. Сеть в первую очередь исправляет то, где ошибается сильно.</li>
+        <li><b>Гладкость.</b> У квадрата везде есть производная <code>2·(ypred − y)</code>, и она плавно уменьшается по мере приближения к цели. Backward нужна именно она.</li>
+      </ol>
+    </article>
+    <article class="card">
+      <h2>Сумма или среднее?</h2>
+      <p>Размножим датасет: те же 4 примера, повторённые N раз. Ошибка на каждом примере не изменилась, а сумма растёт.</p>
+      <div id="rep"></div>
+      <table class="t" id="sumvsmean"></table>
+      <p class="note">Вместе с суммой в N раз растут и градиенты, и шаг <code>lr · grad</code> становится огромным: обучение «взрывается».
+        Среднее (<code>loss / N</code>) от N не зависит, поэтому в проекте берём среднее: <code>$loss->mul(1 / count($digits))</code>.</p>
+    </article>
+  </section>
+
+  <section class="two">
+    <article class="card">
+      <h2>Loss — самый обычный Value, корень графа</h2>
+      <div class="say" id="graphinfo"></div>
+      <p>Ради этого все ошибки и сводятся в <b>одно</b> число: у графа появляется один корень.
+        <code>$loss->backward()</code> ставит ему <code>grad = 1</code> и одним проходом доносит градиент до каждого веса,
+        сразу от всех примеров. Если у весов несколько путей к loss (вес участвует в каждом примере), вклады складываются (<code>+=</code>).</p>
+    </article>
+    <article class="card">
+      <h2>Loss в нашем проекте (живые числа из PHP)</h2>
+      <p>У нас 10 выходов. Цель для цифры <b id="dg">3</b>: +1 у нейрона этой цифры, −1 у остальных.</p>
+      <div class="stepper" id="digits"></div>
+      <table class="t" id="proj"></table>
+      <p class="note">Это ответ <code>api.php</code>, то есть настоящей PHP-модели с весами из SQLite. Loss эпохи — среднее такого числа по всем 10 цифрам.</p>
+    </article>
+  </section>
+
+  <section class="card">
+    <h2>Код</h2>
+    <div id="code"></div>
+  </section>
+
+  <section class="card retell">
+    <h2>Как объяснить другому</h2>
+    <ol>
+      <li>Loss — одно число, которое говорит, насколько сеть сейчас ошибается на всех примерах. Цель обучения — сделать его как можно меньше.</li>
+      <li>Для каждого примера берём разницу «ответ − правильный ответ» и возводим в квадрат, чтобы плюсы и минусы не гасили друг друга, а большие промахи штрафовались сильнее.</li>
+      <li>Квадраты усредняем по примерам: так величина loss и градиентов не зависит от размера датасета.</li>
+      <li>Loss — такой же Value, как и всё остальное, просто стоит в самом конце графа. Поэтому один вызов <code>$loss->backward()</code> считает градиенты для всех весов сразу.</li>
+    </ol>
+  </section>
+  <nav class="pager" id="pager"></nav>
+</main>
+<script src="../nav.js"></script>
+<script src="engine.js"></script>
+<script>
+renderCode($('code'), `
+// одна эпоха: loss по всем примерам — один Value
+$loss = new Value(0.0);
+foreach ($digits as $digit) {
+    $ypred = $model(Digits::encode(Digits::toInput($digit)));   // 10 выходов
+    $ys = Digits::target($digit);                             // +1 у правильной цифры, −1 у остальных
+    foreach ($ypred as $k => $yk) {
+        $diff = $yk->sub($ys[$k]);                           // ошибка
+        $loss = $loss->add($diff->mul($diff));               // + ошибка²
+    }
+}
+$loss = $loss->mul(1 / count($digits));                      // среднее, а не сумма
+$loss->backward();                                           // grad для всех весов разом`, [[8, 9], [12]]);
+
+const xs = [[2, 3, -1], [3, -1, 0.5], [0.5, 1, 1], [1, 1, -1]];
+const ys = [1, -1, -1, 1];
+let seed = 11, model, preds, reps = 1;
+
+function forward() {
+  preds = xs.map((x) => model.call(x.map((v) => new V(v)))[0].data);
+}
+function reroll() { model = new MLP(3, [4, 4, 1], rng(seed)); forward(); render(); }
+
+function lossOf(n, mean) {
+  let loss = new V(0);
+  for (let r = 0; r < n; r++) xs.forEach((x, i) => {
+    const d = model.call(x.map((v) => new V(v)))[0].sub(ys[i]);
+    loss = loss.add(d.mul(d));
+  });
+  if (mean) loss = loss.mul(1 / (n * xs.length));
+  for (const p of model.parameters()) p.grad = 0;
+  loss.backward();
+  return { loss, maxGrad: Math.max(...model.parameters().map((p) => Math.abs(p.grad))) };
+}
+
+function render() {
+  let t = '<tr><th>#</th><th>x</th><th>ypred</th><th>y</th><th>ypred − y</th><th>(ypred − y)²</th></tr>';
+  let sum = 0, raw = 0;
+  preds.forEach((p, i) => {
+    const d = p - ys[i]; sum += d * d; raw += d;
+    t += `<tr><td>${i + 1}</td><td class="mono">[${xs[i].join(', ')}]</td><td>${f3(p)}</td><td>${ys[i] > 0 ? '+1' : '−1'}</td><td>${f3(d)}</td><td><b>${f3(d * d)}</b></td></tr>`;
+  });
+  $('tbl').innerHTML = t;
+  $('sum').innerHTML = `<b>loss</b> = ${preds.map((p, i) => f3((p - ys[i]) ** 2)).join(' + ')} = <b>${f3(sum)}</b>
+    &nbsp;·&nbsp; среднее = ${f3(sum)} / 4 = <b>${f3(sum / 4)}</b>`;
+  $('rawsum').textContent = f3(raw);
+  $('sqsum').textContent = f3(sum);
+
+  // числовые прямые и квадраты ошибок
+  const W = 440, rowH = 62, H = rowH * 4 + 10, x0 = 20, x1 = 300, X = (v) => x0 + (v + 1.2) / 2.4 * (x1 - x0);
+  let h = '';
+  preds.forEach((p, i) => {
+    const y = 26 + i * rowH, d = p - ys[i], side = Math.min(58, Math.abs(d) * 29);
+    h += `<line x1="${x0}" x2="${x1}" y1="${y}" y2="${y}" stroke="${cssVar('--line')}" stroke-width="2"/>
+      <text x="${X(-1)}" y="${y + 18}" font-size="10" text-anchor="middle" fill="${cssVar('--ink-3')}">−1</text>
+      <text x="${X(0)}" y="${y + 18}" font-size="10" text-anchor="middle" fill="${cssVar('--ink-3')}">0</text>
+      <text x="${X(1)}" y="${y + 18}" font-size="10" text-anchor="middle" fill="${cssVar('--ink-3')}">+1</text>
+      <line x1="${X(p)}" x2="${X(ys[i])}" y1="${y}" y2="${y}" stroke="${cssVar('--neg')}" stroke-width="4"/>
+      <path d="M${X(ys[i])},${y - 8} l8,8 l-8,8 l-8,-8 z" fill="${cssVar('--ink')}"/>
+      <circle cx="${X(p)}" cy="${y}" r="6" fill="${cssVar('--pos')}" stroke="${cssVar('--surface')}" stroke-width="2"/>
+      <text x="4" y="${y - 12}" font-size="11" fill="${cssVar('--ink-2')}">#${i + 1}</text>
+      <rect x="${340}" y="${y - side / 2}" width="${side}" height="${side}" fill="${cssVar('--neg')}" opacity="0.35" stroke="${cssVar('--neg')}"/>
+      <text x="${340 + side + 6}" y="${y + 4}" font-size="11" fill="${cssVar('--ink')}">${f3(d * d)}</text>`;
+  });
+  $('lines').setAttribute('viewBox', `0 0 ${W} ${H}`);
+  $('lines').innerHTML = h;
+
+  // e, |e|, e²
+  const A = axes({ x: [-2, 2], y: [0, 4], xTicks: 4, yTicks: 4, xLabel: 'ошибка (ypred − y)', yLabel: 'штраф' });
+  const pts = (fn) => { const a = []; for (let x = -2; x <= 2.001; x += 0.05) a.push([x, fn(x)]); return a; };
+  $('sq').innerHTML = A.html +
+    `<path d="${pathOf(pts(Math.abs), A.X, A.Y)}" fill="none" stroke="${cssVar('--ink-3')}" stroke-width="2" stroke-dasharray="5 4"/>
+     <path d="${pathOf(pts((x) => x * x), A.X, A.Y)}" fill="none" stroke="${cssVar('--pos')}" stroke-width="2"/>
+     <text x="${A.X(1.55)}" y="${A.Y(3.3)}" font-size="12" fill="${cssVar('--ink')}">ошибка²</text>
+     <text x="${A.X(1.3)}" y="${A.Y(1.05)}" font-size="12" fill="${cssVar('--ink-2')}">|ошибка|</text>` +
+    preds.map((p, i) => { const d = Math.max(-2, Math.min(2, p - ys[i])); return `<circle cx="${A.X(d)}" cy="${A.Y(d * d)}" r="5" fill="${cssVar('--neg')}" stroke="${cssVar('--surface')}" stroke-width="2"><title>пример ${i + 1}</title></circle>`; }).join('');
+
+  // сумма vs среднее
+  const s = lossOf(reps, false), m = lossOf(reps, true);
+  $('sumvsmean').innerHTML = `<tr><th></th><th>сумма</th><th>среднее</th></tr>
+    <tr><td>примеров</td><td colspan="2" style="text-align:center">${reps * 4}</td></tr>
+    <tr><td>loss</td><td>${f3(s.loss.data)}</td><td>${f3(m.loss.data)}</td></tr>
+    <tr><td>самый большой |grad| веса</td><td><b>${f3(s.maxGrad)}</b></td><td><b>${f3(m.maxGrad)}</b></td></tr>`;
+
+  const nodes = s.loss.topo();
+  const params = model.parameters();
+  $('graphinfo').innerHTML = `В графе loss по 4 примерам (сумма, N = ${reps}) <b>${nodes.length}</b> узлов Value.
+    Из них <b>${params.length}</b> — параметры сети (листья), корень — один <code>$loss</code>.`;
+}
+
+sliders('rep', [{ name: 'n', label: 'N ×', min: 1, max: 10, step: 1, value: 1 }], (v) => { reps = v.n; render(); });
+$('reroll').addEventListener('click', () => { seed++; reroll(); });
+$('train').addEventListener('click', () => {
+  for (let s = 0; s < 20; s++) {
+    const { loss } = lossOf(1, true);
+    for (const p of model.parameters()) p.data -= 0.1 * p.grad;
+  }
+  forward(); render();
+});
+reroll();
+
+// живые числа из PHP-модели
+$('digits').innerHTML = [...Array(10).keys()].map((d) => `<button data-d="${d}">${d}</button>`).join('');
+async function proj(d) {
+  $('dg').textContent = d;
+  $('digits').querySelectorAll('button').forEach((b) => b.classList.toggle('primary', b.dataset.d === String(d)));
+  try {
+    const st = await (await fetch('../api.php?action=state')).json();
+    const x = st.digits[d];
+    const r = await (await fetch('../api.php?action=forward', { method: 'POST', body: JSON.stringify({ x, target: +d }) })).json();
+    let t = '<tr><th>нейрон</th><th>выход</th><th>цель</th><th>(выход − цель)²</th></tr>', sum = 0;
+    r.outputs.forEach((o, k) => {
+      const tg = k === +d ? 1 : -1, e = (o - tg) ** 2; sum += e;
+      t += `<tr class="${k === +d ? 'hl' : ''}"><td>«${k}»</td><td>${f3(o)}</td><td>${tg > 0 ? '+1' : '−1'}</td><td>${e.toFixed(4)}</td></tr>`;
+    });
+    t += `<tr><td><b>Σ</b></td><td></td><td></td><td><b>${sum.toFixed(4)}</b></td></tr>`;
+    $('proj').innerHTML = t;
+  } catch (e) { $('proj').innerHTML = '<tr><td>Запустите сервер: php -S localhost:8000 -t public</td></tr>'; }
+}
+$('digits').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => proj(b.dataset.d)));
+proj(3);
+</script>
+</body>
+</html>

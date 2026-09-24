@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Урок 7: Обновление весов</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="learn.css">
+</head>
+<body>
+<main class="lesson">
+  <header>
+    <div class="kicker">Урок 7 из 8</div>
+    <h1>Обновление весов: шаг против градиента</h1>
+    <p>Градиент показывает, в какую сторону loss <b>растёт</b>. Нам нужно, чтобы он падал, поэтому сдвигаем каждый вес в обратную сторону:
+      <code>w −= lr · grad</code>. <b>lr</b> (learning rate) — размер шага. Это вся «учёба»: forward, loss, backward, маленький шаг, и так по кругу.</p>
+  </header>
+
+  <section class="card">
+    <h2>Один вес, один пример: спускаемся с горки</h2>
+    <div class="stepper">
+      <span>функция:</span>
+      <button data-fn="neuron" class="primary">нейрон: (tanh(w) − 0.8)²</button>
+      <button data-fn="parab">парабола: (w − 1)²</button>
+    </div>
+    <div class="two-wide">
+      <div><svg id="curve" viewBox="0 0 560 300" style="width:100%;height:auto"></svg></div>
+      <div>
+        <div id="sl"></div>
+        <div class="stepper">
+          <button id="one" class="primary">1 шаг</button><button id="ten">10 шагов</button><button id="reset">⟲ сброс</button>
+        </div>
+        <div class="say" id="say"></div>
+      </div>
+    </div>
+    <p class="note">Что попробовать: маленький lr (0.05) — медленно ползём. Большой lr на параболе (1.1) — перелетаем минимум и улетаем всё дальше.
+      На «нейроне» поставьте w = −3: там tanh насыщен, горка почти плоская, grad крошечный, и обучение еле движется.</p>
+  </section>
+
+  <section class="two">
+    <article class="card">
+      <h2>Почему минус?</h2>
+      <ul>
+        <li><b>grad &gt; 0</b>: если увеличить w, loss вырастет. Значит, w надо <b>уменьшить</b>: <code>w − lr·(+) </code> → меньше.</li>
+        <li><b>grad &lt; 0</b>: увеличение w уменьшает loss. Значит, w надо <b>увеличить</b>: <code>w − lr·(−)</code> → больше.</li>
+        <li><b>|grad| большой</b>: склон крутой, и шаг получится большим. У минимума склон пологий, шаги сами становятся мелкими.</li>
+      </ul>
+      <p class="note">В сети то же самое, только весов не один, а 314, и каждый делает свой шаг по своему градиенту одновременно.
+        Вместе это движение вниз по «горке» в 314-мерном пространстве.</p>
+    </article>
+    <article class="card">
+      <h2>Зачем zero_grad перед backward</h2>
+      <p>backward не присваивает, а <b>прибавляет</b> (<code>+=</code>). Если не обнулять, градиент прошлой эпохи останется,
+        и к нему добавится новый. Ниже одна и та же парабола, lr = 0.1, два варианта:</p>
+      <svg id="zg" viewBox="0 0 460 220" style="width:100%;height:auto"></svg>
+      <div class="legend"><span><i class="sw pos"></i> с zero_grad</span><span><i class="sw neg"></i> без zero_grad</span></div>
+      <table class="t" id="zt"></table>
+    </article>
+  </section>
+
+  <section class="card">
+    <h2>Полный цикл обучения из проекта</h2>
+    <div class="stepper" id="phase"></div>
+    <div class="two-wide">
+      <div id="code"></div>
+      <div class="say" id="phaseSay"></div>
+    </div>
+  </section>
+
+  <section class="card retell">
+    <h2>Как объяснить другому</h2>
+    <ol>
+      <li>Градиент показывает направление, в котором loss растёт быстрее всего. Идём в противоположную сторону.</li>
+      <li><code>w −= lr · grad</code>: lr — длина шага. Слишком маленький — учимся медленно, слишком большой — проскакиваем минимум и можем разойтись.</li>
+      <li>Шаг делаем маленьким, потому что градиент верен только рядом с текущей точкой. После шага пересчитываем всё заново.</li>
+      <li>Перед каждым backward градиенты обнуляем (zero_grad), иначе они копятся с прошлых эпох и шаги становятся всё больше.</li>
+      <li>Цикл «forward → loss → zero_grad → backward → update», повторённый сотни раз, и есть обучение нейросети.</li>
+    </ol>
+  </section>
+  <nav class="pager" id="pager"></nav>
+</main>
+<script src="../nav.js"></script>
+<script src="engine.js"></script>
+<script>
+const FN = {
+  neuron: { f: (w) => (Math.tanh(w) - 0.8) ** 2, range: [-3.5, 3.5], y: [0, 3.4], start: -1.5, lr: 0.5, min: Math.atanh(0.8) },
+  parab: { f: (w) => (w - 1) ** 2, range: [-3, 5], y: [0, 16], start: -2, lr: 0.1, min: 1 },
+};
+let fn = 'neuron', w, lr, trail = [];
+
+/** loss и grad считаем через Value — тот же backward, что в проекте */
+function lossAndGrad(wv) {
+  const W = new V(wv, [], '', 'w');
+  const L = fn === 'neuron' ? W.tanh().sub(0.8) : W.sub(1);
+  const loss = L.mul(L);
+  loss.backward();
+  return { loss: loss.data, grad: W.grad };
+}
+
+function draw() {
+  const F = FN[fn];
+  const A = axes({ W: 560, H: 300, x: F.range, y: F.y, xTicks: 7, yTicks: 4, xLabel: 'w', yLabel: 'loss(w)' });
+  const pts = []; for (let x = F.range[0]; x <= F.range[1] + 1e-9; x += 0.04) pts.push([x, Math.min(F.y[1] * 1.2, F.f(x))]);
+  const { loss, grad } = lossAndGrad(w);
+  const cw = Math.max(F.range[0], Math.min(F.range[1], w));
+  const tan = [[cw - 0.8, loss - 0.8 * grad], [cw + 0.8, loss + 0.8 * grad]];
+  const next = w - lr * grad;
+  let h = A.html + `<defs><clipPath id="clip"><rect x="${A.pad.l}" y="${A.pad.t}" width="${A.W - A.pad.l - A.pad.r}" height="${A.H - A.pad.t - A.pad.b}"/></clipPath></defs><g clip-path="url(#clip)">`;
+  h += `<path d="${pathOf(pts, A.X, A.Y)}" fill="none" stroke="${cssVar('--pos')}" stroke-width="2"/>`;
+  h += `<line x1="${A.X(F.min)}" x2="${A.X(F.min)}" y1="${A.pad.t}" y2="${A.H - A.pad.b}" stroke="${cssVar('--ink-3')}" stroke-dasharray="2 4"/>`;
+  trail.forEach((p, i) => { if (i) h += `<line x1="${A.X(trail[i - 1][0])}" y1="${A.Y(trail[i - 1][1])}" x2="${A.X(p[0])}" y2="${A.Y(p[1])}" stroke="${cssVar('--ink-3')}" stroke-width="1"/>`; });
+  trail.forEach((p) => { h += `<circle cx="${A.X(p[0])}" cy="${A.Y(p[1])}" r="3" fill="${cssVar('--ink-3')}"/>`; });
+  h += `<path d="${pathOf(tan, A.X, A.Y)}" stroke="${cssVar('--hi')}" stroke-width="2" stroke-dasharray="5 4"/>`;
+  h += `<line x1="${A.X(w)}" y1="${A.H - A.pad.b - 8}" x2="${A.X(next)}" y2="${A.H - A.pad.b - 8}" stroke="${cssVar('--neg')}" stroke-width="3" marker-end="url(#arr2)"/>`;
+  h += `<circle cx="${A.X(w)}" cy="${A.Y(loss)}" r="8" fill="${cssVar('--hi')}" stroke="${cssVar('--surface')}" stroke-width="2"/></g>`;
+  h += `<defs><marker id="arr2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="${cssVar('--neg')}"/></marker></defs>`;
+  h += `<text x="${A.X(F.min) + 4}" y="${A.pad.t + 12}" font-size="10" fill="${cssVar('--ink-3')}">минимум</text>`;
+  $('curve').innerHTML = h;
+  $('say').innerHTML = `w = <b>${f3(w)}</b>, loss = ${f3(loss)}<br>grad = наклон = <b>${f3(grad)}</b>
+    ${grad > 0 ? '(справа выше → идём влево)' : grad < 0 ? '(справа ниже → идём вправо)' : ''}<br>
+    следующий шаг: <code>w = ${f3(w)} − ${lr}·${f3(grad)} = ${f3(next)}</code>` +
+    (trail.length > 1 ? `<br><span class="note">сделано шагов: ${trail.length - 1}</span>` : '') +
+    (Math.abs(w) > 50 ? '<br><b>Разошлось!</b> lr слишком большой.' : '');
+}
+function step(n) {
+  for (let i = 0; i < n; i++) {
+    const { grad } = lossAndGrad(w);
+    w = w - lr * grad;
+    trail.push([w, FN[fn].f(w)]);
+  }
+  draw();
+}
+let sl;
+function setFn(name) {
+  fn = name; w = FN[fn].start; lr = FN[fn].lr; trail = [[w, FN[fn].f(w)]];
+  document.querySelectorAll('[data-fn]').forEach((b) => b.classList.toggle('primary', b.dataset.fn === fn));
+  sl = sliders('sl', [
+    { name: 'w0', label: 'w₀', min: FN[fn].range[0], max: FN[fn].range[1], value: w },
+    { name: 'lr', label: 'lr', min: 0.01, max: fn === 'parab' ? 1.2 : 3, step: 0.01, value: lr },
+  ], (v) => { lr = v.lr; if (v.w0 !== trail[0][0]) { w = v.w0; trail = [[w, FN[fn].f(w)]]; } draw(); });
+  draw();
+}
+document.querySelectorAll('[data-fn]').forEach((b) => b.addEventListener('click', () => setFn(b.dataset.fn)));
+$('one').addEventListener('click', () => step(1));
+$('ten').addEventListener('click', () => step(10));
+$('reset').addEventListener('click', () => { w = trail[0][0]; trail = [[w, FN[fn].f(w)]]; draw(); });
+setFn('neuron');
+
+// zero_grad: два прогона на параболе
+(function zeroGrad() {
+  const run = (zero) => {
+    const W = new V(-2, [], '', 'w'); const rows = [];
+    for (let s = 0; s < 12; s++) {
+      if (zero) W.grad = 0;
+      const d = W.sub(1); const L = d.mul(d);
+      const topo = L.topo(); L.grad = 1; for (let i = topo.length - 1; i >= 0; i--) topo[i]._backward();
+      rows.push({ s: s + 1, grad: W.grad, loss: L.data });
+      W.data -= 0.1 * W.grad;
+    }
+    return rows;
+  };
+  const a = run(true), b = run(false);
+  const maxL = Math.max(...a.map((r) => r.loss), ...b.map((r) => r.loss));
+  const A = axes({ W: 460, H: 220, x: [1, 12], y: [0, Math.ceil(maxL)], xTicks: 11, yTicks: 4, xLabel: 'эпоха', yLabel: 'loss' });
+  const line = (rows, c) => `<path d="${pathOf(rows.map((r) => [r.s, r.loss]), A.X, A.Y)}" fill="none" stroke="${cssVar(c)}" stroke-width="2"/>` +
+    rows.map((r) => `<circle cx="${A.X(r.s)}" cy="${A.Y(r.loss)}" r="3" fill="${cssVar(c)}"/>`).join('');
+  $('zg').innerHTML = A.html + line(a, '--pos') + line(b, '--neg');
+  let t = '<tr><th>эпоха</th><th>grad с zero_grad</th><th>grad без zero_grad</th></tr>';
+  for (let i = 0; i < 6; i++) t += `<tr><td>${i + 1}</td><td>${f3(a[i].grad)}</td><td>${f3(b[i].grad)}</td></tr>`;
+  $('zt').innerHTML = t;
+})();
+
+// полный цикл
+const CODE = `
+for ($epoch = 0; $epoch < 200; $epoch++) {
+    // 1. forward: прогоняем все примеры
+    // 2. loss: одно число — среднее Σ(ypred − y)²
+    $loss = Trainer::loss($model, $digits)['loss'];
+
+    // 3. zero_grad: убираем градиенты прошлой эпохи
+    foreach ($model->parameters() as $p) {
+        $p->grad = 0.0;
+    }
+
+    // 4. backward: grad для каждого параметра
+    $loss->backward();
+
+    // 5. update: шаг против градиента
+    foreach ($model->parameters() as $p) {
+        $p->data -= $lr * $p->grad;
+    }
+}`;
+const PH = [
+  ['forward + loss', [[2, 4]], 'Прогоняем все 10 цифр через сеть и сводим ошибки в одно число loss. По пути строится граф из тысяч Value (уроки 1–5).'],
+  ['zero_grad', [[6, 9]], 'Обнуляем grad у всех 314 параметров. Иначе <code>+=</code> в backward прибавит новый градиент к старому.'],
+  ['backward', [[11, 12]], 'Один вызов на корне графа, и у каждого параметра заполнен grad (урок 6).'],
+  ['update', [[14, 17]], 'Каждый параметр делает шаг против своего градиента. Меняем только <code>data</code>: граф прошлой эпохи больше не нужен, в следующей эпохе forward построит новый.'],
+];
+$('phase').innerHTML = PH.map((p, i) => `<button data-i="${i}">${i + 1}. ${p[0]}</button>`).join('');
+const showPh = (i) => {
+  renderCode($('code'), CODE, PH[i][1]);
+  $('phaseSay').innerHTML = PH[i][2];
+  $('phase').querySelectorAll('button').forEach((b) => b.classList.toggle('primary', +b.dataset.i === i));
+};
+$('phase').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => showPh(+b.dataset.i)));
+showPh(0);
+</script>
+</body>
+</html>

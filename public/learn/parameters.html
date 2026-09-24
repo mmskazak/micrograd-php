@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Урок 8: parameters()</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="learn.css">
+<style>
+  .tree { display: grid; gap: 8px; }
+  .tbox { border: 1px solid var(--line); border-radius: 10px; padding: 8px; background: var(--surface); }
+  .tbox.mlp { background: var(--bg); }
+  .tbox > .ttl { font-size: 12px; color: var(--ink-3); margin-bottom: 6px; font-family: ui-monospace, Menlo, monospace; }
+  .tbox .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .tbox.neuron { padding: 6px; }
+  .tbox.on { outline: 2px solid var(--hi); }
+  .flat { display: grid; gap: 10px; }
+  .flat .lvl { font-size: 12px; color: var(--ink-3); margin-bottom: 3px; }
+  .flat .group { display: inline-flex; flex-wrap: wrap; gap: 3px; padding: 3px; border-radius: 8px; border: 1px dashed var(--line); margin: 0 4px 4px 0; }
+</style>
+</head>
+<body>
+<main class="lesson">
+  <header>
+    <div class="kicker">Урок 8 из 8</div>
+    <h1>Почему все параметры сгоняются в один массив</h1>
+    <p>Внутри сеть вложенная: MLP → слои → нейроны → веса. А циклу обучения нужно одно: «пройди по <b>каждому</b> весу и сделай с ним X»
+      (обнули grad, сдвинь data, сохрани в базу). Метод <code>parameters()</code> на каждом уровне расплющивает вложенность
+      в плоский список, и дальше цикл обучения не знает и не хочет знать, сколько в сети слоёв.</p>
+  </header>
+
+  <section class="card">
+    <h2>Сеть MLP(2, [3, 2]): 17 параметров</h2>
+    <div class="stepper">
+      <button id="play" class="primary">▶ вызвать $model->parameters()</button>
+      <button id="stepBtn">по шагам</button>
+      <span class="count" id="stage"></span>
+    </div>
+    <div class="two">
+      <div>
+        <h2>Как это лежит внутри</h2>
+        <div class="tree" id="tree"></div>
+      </div>
+      <div>
+        <h2>Что возвращает parameters()</h2>
+        <div class="flat" id="flat"></div>
+        <div class="say" id="say" style="margin-top:8px">Нажмите «вызвать parameters()».</div>
+      </div>
+    </div>
+    <p class="note">Наведите на любой элемент плоского списка: подсветится то же самое место в дереве. Это один и тот же объект.</p>
+  </section>
+
+  <section class="card">
+    <h2>Update через плоский список меняет настоящую сеть</h2>
+    <p>Посчитаем loss на одном примере, сделаем backward и выполним ровно тот цикл, что в проекте:
+      <code>foreach ($model->parameters() as $p) $p->data -= $lr * $p->grad;</code></p>
+    <div class="stepper">
+      <button id="upd" class="primary">сделать шаг update</button>
+      <label class="note"><input type="checkbox" id="copies"> а если бы <code>parameters()</code> возвращал копии чисел</label>
+    </div>
+    <div class="say" id="updSay">Значения в дереве выше изменятся и мигнут.</div>
+  </section>
+
+  <section class="two">
+    <article class="card">
+      <h2>Почему это работает в PHP</h2>
+      <p>В PHP <b>массивы копируются по значению</b>, а <b>объекты передаются по «ручке»</b> (handle). Когда
+        <code>array_push($params, ...$neuron->parameters())</code> кладёт Value в новый массив, копируется не объект, а ручка к нему.
+        В плоском списке и внутри нейрона лежит <i>один и тот же</i> объект, и <code>$p->data -= …</code> меняет вес прямо в сети.</p>
+      <p>Если бы веса были просто <code>float</code> в массивах, <code>parameters()</code> вернул бы копии чисел,
+        и update менял бы копии, а сеть оставалась бы прежней. Включите галочку выше, чтобы это увидеть.</p>
+      <div id="code"></div>
+    </article>
+    <article class="card">
+      <h2>Что даёт плоский список</h2>
+      <ul>
+        <li><b>Цикл обучения не зависит от архитектуры.</b> Одни и те же 6 строк zero_grad + update работают для 17 параметров и для 314 (наш проект), для 1 слоя и для 10.</li>
+        <li><b>Вложенность спрятана.</b> Каждый уровень отвечает только за себя: нейрон отдаёт свои веса, слой склеивает списки нейронов, MLP склеивает списки слоёв.</li>
+        <li><b>Все параметры видны разом:</b> их удобно посчитать (<code>count(...)</code>), сохранить, загрузить, обнулить.</li>
+        <li>Так же устроен PyTorch: <code>model.parameters()</code> и <code>optimizer = SGD(model.parameters(), lr)</code>. Оптимизатор получает плоский список и больше ничего о сети не знает.</li>
+      </ul>
+      <div class="say">В нашем проекте: <code>Trainer::epoch()</code> делает <code>foreach ($model->parameters() as $p)</code> дважды,
+        для zero_grad и для update, и ни разу не упоминает слои.</div>
+    </article>
+  </section>
+
+  <section class="card retell">
+    <h2>Как объяснить другому</h2>
+    <ol>
+      <li>Сеть — вложенная структура: MLP держит слои, слой держит нейроны, нейрон держит веса.</li>
+      <li><code>parameters()</code> на каждом уровне собирает все Value снизу в один плоский список.</li>
+      <li>Это не копии: в списке лежат ссылки на те же объекты. Изменили вес в списке — он изменился в сети.</li>
+      <li>Благодаря этому обучение — два простых цикла по списку (обнулить grad, сдвинуть data), одинаковые для сети любой формы.</li>
+    </ol>
+  </section>
+  <nav class="pager" id="pager"></nav>
+</main>
+<script src="../nav.js"></script>
+<script src="engine.js"></script>
+<script>
+renderCode($('code'), `
+// Neuron: свои веса + bias
+public function parameters(): array
+{
+    return [...$this->w, $this->b];
+}
+
+// Layer: склеивает списки своих нейронов
+public function parameters(): array
+{
+    $params = [];
+    foreach ($this->neurons as $neuron) {
+        array_push($params, ...$neuron->parameters());
+    }
+    return $params;
+}
+
+// MLP: склеивает списки своих слоёв
+public function parameters(): array
+{
+    $params = [];
+    foreach ($this->layers as $layer) {
+        array_push($params, ...$layer->parameters());
+    }
+    return $params;
+}`, []);
+
+const model = new MLP(2, [3, 2], rng(5));
+// короткие имена для фишек
+model.layers.forEach((L, l) => L.neurons.forEach((n, j) => {
+  n.w.forEach((w, i) => { w.label = `L${l + 1}n${j + 1}.w${i + 1}`; w.short = `w${i + 1}`; w.kind = 'w'; });
+  n.b.label = `L${l + 1}n${j + 1}.b`; n.b.short = 'b'; n.b.kind = 'b';
+}));
+let stage = 0, hoverId = null;
+const chip = (p, extra = '') => `<span class="chip ${p.kind}${extra}" data-id="${p.id}" title="${p.label}">${p.short} ${f2(p.data)}</span>`;
+
+function drawTree(onLevel = null) {
+  let h = `<div class="tbox mlp${onLevel === 'mlp' ? ' on' : ''}"><div class="ttl">MLP</div><div class="tree">`;
+  model.layers.forEach((L, l) => {
+    h += `<div class="tbox${onLevel === 'layer' ? ' on' : ''}"><div class="ttl">layers[${l}] — Layer(${model.sizes[l]}, ${model.sizes[l + 1]})</div><div class="row">`;
+    L.neurons.forEach((n, j) => {
+      h += `<div class="tbox neuron${onLevel === 'neuron' ? ' on' : ''}"><div class="ttl">neurons[${j}]</div><div class="chips">${n.parameters().map((p) => chip(p)).join('')}</div></div>`;
+    });
+    h += '</div></div>';
+  });
+  $('tree').innerHTML = h + '</div></div>';
+}
+
+function drawFlat() {
+  let h = '';
+  const say = [
+    'Нажмите «вызвать parameters()».',
+    '<b>Шаг 1.</b> Каждый нейрон возвращает <code>[...$this->w, $this->b]</code>: свои 2–3 веса и bias.',
+    '<b>Шаг 2.</b> Каждый слой склеивает списки своих нейронов через <code>array_push(...)</code>: 9 и 8 элементов.',
+    '<b>Шаг 3.</b> MLP склеивает списки слоёв: один плоский массив из <b>17</b> Value. Слоёв и нейронов в нём больше не видно, остались одни параметры.',
+  ];
+  if (stage >= 1) {
+    h += '<div><div class="lvl">1) neuron->parameters()</div>';
+    model.layers.forEach((L) => L.neurons.forEach((n) => { h += `<span class="group">${n.parameters().map((p) => chip(p)).join('')}</span>`; }));
+    h += '</div>';
+  }
+  if (stage >= 2) {
+    h += '<div><div class="lvl">2) layer->parameters()</div>';
+    model.layers.forEach((L) => { h += `<span class="group">${L.parameters().map((p) => chip(p)).join('')}</span>`; });
+    h += '</div>';
+  }
+  if (stage >= 3) {
+    h += `<div><div class="lvl">3) $model->parameters() — ${model.parameters().length} элементов</div>
+      <div class="chips">${model.parameters().map((p) => chip(p)).join('')}</div></div>`;
+  }
+  $('flat').innerHTML = h;
+  $('say').innerHTML = say[stage];
+  $('stage').textContent = stage ? `шаг ${stage} из 3` : '';
+  drawTree([null, 'neuron', 'layer', 'mlp'][stage]);
+  bindHover();
+}
+
+function bindHover() {
+  document.querySelectorAll('.chip').forEach((c) => {
+    c.addEventListener('mouseenter', () => {
+      document.querySelectorAll(`.chip[data-id="${c.dataset.id}"]`).forEach((x) => x.classList.add('lit'));
+    });
+    c.addEventListener('mouseleave', () => document.querySelectorAll('.chip.lit').forEach((x) => x.classList.remove('lit')));
+  });
+}
+
+$('stepBtn').addEventListener('click', () => { stage = stage >= 3 ? 1 : stage + 1; drawFlat(); });
+$('play').addEventListener('click', async () => {
+  $('play').disabled = true;
+  for (stage = 1; stage <= 3; stage++) { drawFlat(); await new Promise((r) => setTimeout(r, 1400)); }
+  stage = 3; $('play').disabled = false;
+});
+
+$('upd').addEventListener('click', () => {
+  // loss на одном примере: хотим [+1, −1] на входе [0.5, −1]
+  const out = model.call([new V(0.5), new V(-1)]);
+  let loss = new V(0);
+  [1, -1].forEach((y, k) => { const d = out[k].sub(y); loss = loss.add(d.mul(d)); });
+  const params = model.parameters();
+  for (const p of params) p.grad = 0;
+  loss.backward();
+
+  const copies = $('copies').checked;
+  const lr = 0.5;
+  if (copies) {
+    const floats = params.map((p) => ({ data: p.data, grad: p.grad }));   // «копии»: просто числа
+    for (const p of floats) p.data -= lr * p.grad;                       // меняем копии…
+    $('updSay').innerHTML = `loss = ${f3(loss.data)}. Цикл изменил <b>копии</b>, а дерево сети <b>не изменилось</b>: сеть ничему не научилась.
+      Повторный forward даст тот же loss.`;
+    stage = Math.max(stage, 3); drawFlat();
+    return;
+  }
+  const before = new Map(params.map((p) => [p.id, p.data]));
+  for (const p of params) p.data -= lr * p.grad;
+  const newLoss = (() => { const o = model.call([new V(0.5), new V(-1)]); return (o[0].data - 1) ** 2 + (o[1].data + 1) ** 2; })();
+  stage = Math.max(stage, 3); drawFlat();
+  document.querySelectorAll('.chip').forEach((c) => {
+    const id = +c.dataset.id;
+    if (Math.abs((params.find((p) => p.id === id)?.data ?? 0) - (before.get(id) ?? 0)) > 1e-4) {
+      c.classList.add('flash'); setTimeout(() => c.classList.remove('flash'), 700);
+    }
+  });
+  $('updSay').innerHTML = `loss был ${f3(loss.data)}, после одного шага стал <b>${f3(newLoss)}</b>.
+    Мы трогали только плоский список, но изменились веса <b>в самой сети</b> (они мигнули в дереве): это те же объекты.`;
+});
+
+drawFlat();
+</script>
+</body>
+</html>

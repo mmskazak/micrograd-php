@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Урок 6: Градиенты</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="learn.css">
+</head>
+<body>
+<main class="lesson">
+  <header>
+    <div class="kicker">Урок 6 из 8</div>
+    <h1>Как вычисляются градиенты: backward()</h1>
+    <p>grad узла отвечает на вопрос: <i>если чуть-чуть увеличить это число, во сколько раз быстрее изменится loss?</i>
+      Считать это для каждого веса отдельно долго. backward делает это за <b>один проход</b> от конца графа к началу,
+      на каждом узле применяя маленькое локальное правило. Разберём на графе, где одно число <code>x</code> используется дважды.</p>
+  </header>
+
+  <section class="card">
+    <h2>Граф: L = tanh(x·w₁ + b) · (x·w₂)</h2>
+    <div id="sl"></div>
+    <div class="graph-box"><svg id="g"></svg></div>
+    <div class="two" style="margin-top:12px">
+      <div>
+        <h2>backward() по шагам</h2>
+        <div id="steps"></div>
+        <div class="say" id="say"></div>
+        <label class="note" style="display:block;margin-top:8px"><input type="checkbox" id="broken">
+          сломать: писать <code>grad = …</code> вместо <code>grad += …</code></label>
+        <div class="say" id="brokenSay" hidden></div>
+      </div>
+      <div>
+        <h2>Порядок обхода</h2>
+        <p class="note">Сначала <code>build_topo</code> выстраивает узлы так, что каждый стоит после всех, из кого он получен.
+          backward идёт по этому списку <b>с конца</b>: к моменту, когда узел раздаёт свой grad родителям, все, кто его использует, уже внесли свой вклад.</p>
+        <div class="chips" id="topo"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="two">
+    <article class="card">
+      <h2>Цепное правило: grad = произведение вдоль пути</h2>
+      <p>Кликните по листу на графе (x, w₁, b или w₂). Ниже — все пути от него до L. На каждой стрелке стоит локальная производная,
+        вдоль пути они <b>перемножаются</b>, а вклады разных путей <b>складываются</b>.</p>
+      <div id="paths"></div>
+    </article>
+    <article class="card">
+      <h2>Три локальных правила — это всё, что нужно</h2>
+      <table class="t">
+        <tr><th>операция</th><th>forward</th><th>что получают входы при backward</th></tr>
+        <tr><td><b>+</b></td><td class="mono">out = a + b</td><td class="mono" style="text-align:left">a.grad += out.grad<br>b.grad += out.grad</td></tr>
+        <tr><td><b>×</b></td><td class="mono">out = a · b</td><td class="mono" style="text-align:left">a.grad += b.data · out.grad<br>b.grad += a.data · out.grad</td></tr>
+        <tr><td><b>tanh</b></td><td class="mono">out = tanh(a)</td><td class="mono" style="text-align:left">a.grad += (1 − out²) · out.grad</td></tr>
+      </table>
+      <p class="note">«+» — распределитель: копирует градиент обоим входам. «×» — переключатель: каждому входу даёт градиент, умноженный на <i>другой</i> вход.
+        tanh гасит градиент там, где он насыщен. Вычитание в проекте — это <code>a + b·(−1)</code>, так что отдельного правила не нужно.</p>
+    </article>
+  </section>
+
+  <section class="card">
+    <h2>Код backward()</h2>
+    <div id="code"></div>
+  </section>
+
+  <section class="card retell">
+    <h2>Как объяснить другому</h2>
+    <ol>
+      <li>grad — чувствительность loss к числу: «если это число подрастёт на чуть-чуть, loss изменится на grad × чуть-чуть».</li>
+      <li>Каждая операция знает только свою локальную производную (для «+» это 1, для «×» — другой множитель, для tanh — 1 − tanh²).</li>
+      <li>Цепное правило: чтобы узнать влияние далёкого числа, перемножаем локальные производные вдоль пути. Если путей несколько, их вклады складываются. Поэтому в коде <code>+=</code>.</li>
+      <li>backward обходит граф в обратном топологическом порядке, чтобы каждый узел отдал grad дальше только после того, как собрал его полностью.</li>
+      <li>Итог: за один проход назад известен grad каждого веса, даже если весов тысячи.</li>
+    </ol>
+  </section>
+  <nav class="pager" id="pager"></nav>
+</main>
+<script src="../nav.js"></script>
+<script src="engine.js"></script>
+<script>
+renderCode($('code'), `
+public function backward(): void
+{
+    // 1. топологическая сортировка обходом в глубину
+    $topo = [];
+    $visited = [];
+    $build = function (Value $v) use (&$build, &$topo, &$visited) {
+        if (isset($visited[spl_object_id($v)])) return;
+        $visited[spl_object_id($v)] = true;
+        foreach ($v->prev as $child) {
+            $build($child);          // сначала все, из кого получен узел
+        }
+        $topo[] = $v;                // потом сам узел
+    };
+    $build($this);
+
+    // 2. стартуем с корня и идём с конца списка
+    $this->grad = 1.0;
+    for ($i = count($topo) - 1; $i >= 0; $i--) {
+        ($topo[$i]->backwardFn)();   // локальное правило узла: += в родителей
+    }
+}`, [[18, 21]]);
+
+let S = { x: 0.5, w1: -1.5, b: 0.8, w2: 2 };
+let G, stepper, k = 0, selLeaf = null;
+
+function build() {
+  const x = new V(S.x, [], '', 'x'), w1 = new V(S.w1, [], '', 'w1'), b = new V(S.b, [], '', 'b'), w2 = new V(S.w2, [], '', 'w2');
+  const p = x.mul(w1); p.label = 'p = x·w1';
+  const n = p.add(b); n.label = 'n = p + b';
+  const t = n.tanh(); t.label = 't = tanh(n)';
+  const q = x.mul(w2); q.label = 'q = x·w2';
+  const L = t.mul(q); L.label = 'L = t·q';
+  return { x, w1, b, w2, p, n, t, q, L };
+}
+const nm = (v) => v.label.split(' ')[0];
+
+/** Все пути от листа до корня с локальными производными на каждой стрелке */
+function paths(leaf, root) {
+  const res = [];
+  const walk = (v, acc) => {
+    if (v === root) { res.push(acc); return; }
+    for (const parent of root.topo().filter((u) => u.prev.includes(v))) {
+      let local;
+      if (parent.op === '+') local = 1;
+      else if (parent.op === '*') local = parent.prev[0] === v ? parent.prev[1].data : parent.prev[0].data;
+      else local = 1 - parent.data * parent.data;
+      walk(parent, [...acc, { from: v, to: parent, local }]);
+    }
+  };
+  walk(leaf, []);
+  return res;
+}
+
+function render() {
+  V.accumulate = !$('broken').checked;
+  stepper.go(k);
+  const info = stepper.info;
+  drawGraph($('g'), G.L, {
+    active: info?.node ?? (k === 1 ? G.L : null), recv: new Set(info ? info.node.prev : []), sel: selLeaf,
+    onClick: (v) => { if (!v.prev.length) { selLeaf = v; renderPaths(); render(); } },
+    explain: (v) => `<b>${esc(v.label)}</b><br>data ${f3(v.data)} · grad ${f3(v.grad)}${v.prev.length ? '' : '<br>клик — показать пути до L'}`,
+  });
+  $('say').innerHTML = stepper.explain(nm);
+  ctl.count.textContent = `шаг ${k} из ${stepper.total}`;
+
+  const order = G.L.topo();
+  const cur = info?.node;
+  $('topo').innerHTML = order.map((v, i) => `<span class="chip${v === cur ? ' lit' : ''}">${i + 1}. ${esc(nm(v))}</span>`).join('') +
+    '<span class="note" style="align-self:center">&nbsp;← backward идёт справа налево</span>';
+
+  const bs = $('brokenSay');
+  if (!V.accumulate) {
+    const ok = build(); V.accumulate = true; ok.L.backward(); V.accumulate = false;
+    bs.hidden = false;
+    bs.innerHTML = `Со сломанным <code>=</code> после полного прохода x.grad = <b>${f3(G.x.grad)}</b>, а правильно <b>${f3(ok.x.grad)}</b>.
+      Второй путь (через q или через p) <b>затёр</b> вклад первого. Остальные листья не пострадали: у них всего один путь.`;
+    if (k < stepper.total) bs.innerHTML = 'Дойдите до конца backward, чтобы увидеть, какой grad испортился.';
+  } else bs.hidden = true;
+  V.accumulate = true;
+}
+
+function renderPaths() {
+  if (!selLeaf) { $('paths').innerHTML = '<p class="note">Лист не выбран.</p>'; return; }
+  const fresh = build(); fresh.L.backward();
+  const leaf = fresh[nm(selLeaf)];
+  const ps = paths(leaf, fresh.L);
+  let total = 0, h = '';
+  ps.forEach((p, i) => {
+    const prod = p.reduce((a, e) => a * e.local, 1); total += prod;
+    h += `<div class="say" style="margin:6px 0"><b>путь ${i + 1}:</b> ${esc(nm(leaf))} ` +
+      p.map((e) => `→<sub>×${f3(e.local)}</sub> ${esc(nm(e.to))}`).join(' ') +
+      `<br>произведение: ${p.map((e) => f3(e.local)).join(' · ')} = <b>${f3(prod)}</b></div>`;
+  });
+  h += `<p>Сумма по путям: <b>${f3(total)}</b>. grad из backward: <b>${f3(leaf.grad)}</b>.` +
+    (ps.length > 1 ? ' Путей два, и оба вклада нужно <b>сложить</b>. Именно это делает <code>+=</code>.' : '') + '</p>';
+  $('paths').innerHTML = h;
+}
+
+function rebuild() {
+  G = build();
+  stepper = new BackwardStepper(G.L);
+  if (selLeaf) selLeaf = G[nm(selLeaf)];
+  render(); renderPaths();
+}
+const ctl = stepperControls($('steps'), (a) => {
+  if (a === 'reset') k = 0; else if (a === 'prev') k = Math.max(0, k - 1);
+  else if (a === 'next') k = Math.min(stepper.total, k + 1); else k = stepper.total;
+  render();
+});
+$('broken').addEventListener('change', render);
+sliders('sl', [
+  { name: 'x', min: -2, max: 2, value: S.x }, { name: 'w1', label: 'w₁', min: -3, max: 3, value: S.w1 },
+  { name: 'b', min: -2, max: 2, value: S.b }, { name: 'w2', label: 'w₂', min: -3, max: 3, value: S.w2 },
+], (v) => { S = { ...v }; rebuild(); });
+G = build(); selLeaf = G.x;
+rebuild();
+</script>
+</body>
+</html>

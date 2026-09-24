@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Урок 4: MLP</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="learn.css">
+</head>
+<body>
+<main class="lesson">
+  <header>
+    <div class="kicker">Урок 4 из 8</div>
+    <h1>MLP: слои друг за другом</h1>
+    <p>MLP (многослойный перцептрон) — цепочка слоёв: выход одного слоя становится входом следующего.
+      Вся архитектура задаётся одной строкой: <code>new MLP(nin, [nout₁, nout₂, …])</code>.
+      Размеры соседних слоёв согласуются сами, и ниже видно почему.</p>
+  </header>
+
+  <section class="card">
+    <h2>Задайте архитектуру</h2>
+    <div class="stepper">
+      <label>nin <input id="nin" type="number" min="1" max="12" value="3" style="width:64px"></label>
+      <label>nouts <input id="nouts" value="4, 4, 1" style="width:130px"></label>
+      <button data-p="3|4, 4, 1">как в видео: 3 → [4, 4, 1]</button>
+      <button data-p="9|12, 8, 10">наш проект: 9 → [12, 8, 10]</button>
+      <button data-p="3|1">один нейрон: 3 → [1]</button>
+    </div>
+    <h2 style="margin-top:12px">Как из массива получаются слои</h2>
+    <svg id="sizes" style="width:100%;height:auto"></svg>
+    <p class="note">Код делает <code>$sizes = [nin, ...nouts]</code> и берёт соседние пары. Каждое внутреннее число используется дважды:
+      как <b>nout</b> одного слоя и как <b>nin</b> следующего. Поэтому «сколько выдал» и «сколько ждёт» всегда совпадают.
+      Наведите на слой.</p>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>Прямой проход через всю сеть</h2>
+      <div class="stepper" style="margin:0"><button id="run" class="primary">▶ прогнать вход</button><button id="rnd">другой вход</button></div></div>
+    <div class="say" id="say">Нажмите «прогнать вход»: данные пройдут по сети слева направо, слой за слоем.</div>
+    <svg id="net" style="width:100%;height:auto;margin-top:8px"></svg>
+  </section>
+
+  <section class="two">
+    <article class="card">
+      <h2>Код MLP</h2>
+      <div id="code"></div>
+    </article>
+    <article class="card">
+      <h2>Параметры по слоям</h2>
+      <table class="t" id="params"></table>
+      <p class="note">Посмотрите, как быстро растёт число параметров: оно примерно равно произведению размеров соседних слоёв.</p>
+    </article>
+  </section>
+
+  <section class="card retell">
+    <h2>Как объяснить другому</h2>
+    <ol>
+      <li>MLP — это слои, поставленные в цепочку. Выход слоя передаётся следующему как вход.</li>
+      <li>Архитектура — список размеров: <code>[3, 4, 4, 1]</code> значит «3 входа, два скрытых слоя по 4 нейрона, 1 выход».</li>
+      <li>Внутренние размеры используются дважды (выход одного слоя = вход следующего), поэтому ошибиться с размерами невозможно.</li>
+      <li>Прямой проход — один цикл: <code>foreach ($this->layers as $layer) $x = $layer($x);</code></li>
+      <li>Скрытые слои строят промежуточные признаки: в нашем проекте слой 1 может научиться узнавать «правую половину цифры», а выходной слой собирает из таких признаков цифру.</li>
+    </ol>
+  </section>
+  <nav class="pager" id="pager"></nav>
+</main>
+<script src="../nav.js"></script>
+<script src="engine.js"></script>
+<script>
+const CODE = `
+final class MLP
+{
+    public array $layers;
+
+    public function __construct(int $nin, array $nouts)
+    {
+        $sizes = [$nin, ...$nouts];                // напр. [3, 4, 4, 1]
+        for ($i = 0; $i < count($nouts); $i++) {
+            $this->layers[] = new Layer($sizes[$i], $sizes[$i + 1]);
+        }
+    }
+
+    public function __invoke(array $x): array
+    {
+        foreach ($this->layers as $layer) {
+            $x = $layer($x);   // выход слоя становится входом следующего
+        }
+        return $x;
+    }
+}`;
+let sizes, model, input, acts = null, lit = -1, hoverPair = -1;
+
+function parse() {
+  const nin = Math.max(1, Math.min(12, parseInt($('nin').value) || 1));
+  const nouts = $('nouts').value.split(/[,\s]+/).map((s) => parseInt(s)).filter((n) => n > 0 && n <= 16).slice(0, 5);
+  sizes = [nin, ...(nouts.length ? nouts : [1])];
+  model = new MLP(nin, sizes.slice(1), rng(3));
+  newInput();
+}
+function newInput() {
+  const r = rng(Math.floor(Math.random() * 1e9));
+  input = Array.from({ length: sizes[0] }, () => +(r() * 2 - 1).toFixed(2));
+  acts = null; lit = -1;
+}
+
+function drawSizes() {
+  const n = sizes.length, W = Math.max(520, n * 110), H = 150, bx = (i) => 40 + i * (W - 80) / Math.max(1, n - 1);
+  let h = '';
+  for (let i = 0; i < n - 1; i++) {
+    const on = hoverPair === -1 || hoverPair === i;
+    const x1 = bx(i), x2 = bx(i + 1), mx = (x1 + x2) / 2;
+    h += `<g class="pair" data-i="${i}" style="cursor:default" opacity="${on ? 1 : 0.25}">
+      <path d="M${x1},40 C${x1},100 ${mx},100 ${mx},108" fill="none" stroke="${cssVar('--ink-3')}"/>
+      <path d="M${x2},40 C${x2},100 ${mx},100 ${mx},108" fill="none" stroke="${cssVar('--ink-3')}"/>
+      <rect x="${mx - 58}" y="108" width="116" height="30" rx="8" fill="${cssVar(hoverPair === i ? '--hi' : '--bg')}" stroke="${cssVar('--line')}"/>
+      <text x="${mx}" y="123" text-anchor="middle" dominant-baseline="central" font-size="12" font-family="ui-monospace,monospace" fill="${cssVar('--ink')}">Layer(${sizes[i]}, ${sizes[i + 1]})</text>
+      <text x="${(x1 + mx) / 2 - 4}" y="92" font-size="10" text-anchor="end" fill="${cssVar('--ink-3')}">nin</text>
+      <text x="${(x2 + mx) / 2 + 4}" y="92" font-size="10" fill="${cssVar('--ink-3')}">nout</text></g>`;
+  }
+  sizes.forEach((s, i) => {
+    const role = i === 0 ? 'вход' : i === n - 1 ? 'выход' : 'nout и nin';
+    h += `<rect x="${bx(i) - 26}" y="8" width="52" height="32" rx="8" fill="${cssVar('--surface')}" stroke="${cssVar('--ink')}"/>
+      <text x="${bx(i)}" y="24" text-anchor="middle" dominant-baseline="central" font-size="15" font-weight="700" fill="${cssVar('--ink')}">${s}</text>
+      <text x="${bx(i)}" y="52" text-anchor="middle" font-size="10" fill="${cssVar('--ink-2')}">${role}</text>`;
+  });
+  const svg = $('sizes');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.style.maxWidth = W + 'px';
+  svg.innerHTML = h;
+  svg.querySelectorAll('.pair').forEach((g) => {
+    g.addEventListener('mouseenter', () => { if (hoverPair !== +g.dataset.i) { hoverPair = +g.dataset.i; drawSizes(); } });
+    g.addEventListener('mouseleave', () => { hoverPair = -1; drawSizes(); });
+  });
+}
+
+function drawNet() {
+  const L = sizes.length, maxN = Math.max(...sizes), W = 820, H = Math.max(200, Math.min(520, maxN * 40 + 60));
+  const X = (c) => 60 + c * (W - 140) / Math.max(1, L - 1);
+  const Y = (c, i) => { const n = sizes[c], st = Math.min(40, (H - 70) / Math.max(1, n - 1)); return 40 + (H - 60) / 2 + (i - (n - 1) / 2) * st; };
+  const val = (c, i) => (c === 0 ? input[i] : acts && acts[c] ? acts[c][i] : null);
+  let h = '';
+  for (let c = 1; c < L; c++) {
+    const on = lit >= c;
+    model.layers[c - 1].neurons.forEach((nr, j) => nr.w.forEach((w, i) => {
+      const t = Math.min(1, Math.abs(w.data));
+      h += `<line x1="${X(c - 1)}" y1="${Y(c - 1, i)}" x2="${X(c)}" y2="${Y(c, j)}" stroke="${cssVar(w.data >= 0 ? '--pos' : '--neg')}"
+        stroke-width="${0.5 + 2.5 * t}" opacity="${on ? 0.2 + 0.7 * t : 0.08}"/>`;
+    }));
+  }
+  for (let c = 0; c < L; c++) {
+    const label = c === 0 ? 'вход' : c === L - 1 ? 'выход' : `слой ${c}`;
+    h += `<text x="${X(c)}" y="16" text-anchor="middle" font-size="12" fill="${cssVar(lit === c ? '--ink' : '--ink-2')}" font-weight="${lit === c ? 700 : 400}">${label} (${sizes[c]})</text>`;
+    for (let i = 0; i < sizes[c]; i++) {
+      const v = val(c, i);
+      const shown = c === 0 || lit >= c;
+      const fill = shown && v !== null ? cssVar(v >= 0 ? '--pos' : '--neg') : cssVar('--bg');
+      h += `<circle cx="${X(c)}" cy="${Y(c, i)}" r="14" fill="${fill}" fill-opacity="${shown && v !== null ? 0.25 + 0.75 * Math.abs(v) : 1}" stroke="${cssVar(lit === c ? '--hi' : '--ink-3')}" stroke-width="${lit === c ? 2.5 : 1}"/>`;
+      if (shown && v !== null) h += `<text x="${X(c)}" y="${Y(c, i)}" text-anchor="middle" dominant-baseline="central" font-size="9.5" fill="${cssVar('--ink')}">${f2(v)}</text>`;
+    }
+  }
+  const svg = $('net');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.innerHTML = h;
+}
+
+function drawParams() {
+  let t = '<tr><th>слой</th><th>nin → nout</th><th>весов</th><th>bias</th><th>всего</th></tr>', total = 0;
+  for (let i = 0; i < sizes.length - 1; i++) {
+    const p = sizes[i + 1] * (sizes[i] + 1); total += p;
+    t += `<tr><td>${i + 1}</td><td>${sizes[i]} → ${sizes[i + 1]}</td><td>${sizes[i] * sizes[i + 1]}</td><td>${sizes[i + 1]}</td><td>${p}</td></tr>`;
+  }
+  t += `<tr><td><b>MLP</b></td><td></td><td></td><td></td><td><b>${total}</b></td></tr>`;
+  $('params').innerHTML = t;
+}
+
+async function run() {
+  $('run').disabled = true;
+  acts = [input];
+  let x = input.map((v) => new V(v));
+  lit = 0; drawNet();
+  renderCode($('code'), CODE, [[15]]);
+  $('say').innerHTML = `Вход: <code>[${input.map(f2).join(', ')}]</code> — ${sizes[0]} чисел.`;
+  await new Promise((r) => setTimeout(r, 700));
+  for (let c = 1; c < sizes.length; c++) {
+    x = model.layers[c - 1].call(x);
+    acts[c] = x.map((v) => v.data);
+    lit = c; drawNet();
+    renderCode($('code'), CODE, [[16]]);
+    $('say').innerHTML = `<b>Слой ${c}</b> получил ${sizes[c - 1]} чисел, каждый из его ${sizes[c]} нейронов посчитал tanh(b + Σw·x),
+      и на выходе ${sizes[c]} чисел${c < sizes.length - 1 ? ', которые пойдут дальше как вход слоя ' + (c + 1) : ''}.` +
+      (c === sizes.length - 1 ? ` Это ответ сети: <code>[${acts[c].map(f3).join(', ')}]</code>.` : '');
+    await new Promise((r) => setTimeout(r, 1300));
+  }
+  renderCode($('code'), CODE, [[18]]);
+  $('run').disabled = false;
+}
+
+function all() { drawSizes(); drawNet(); drawParams(); renderCode($('code'), CODE, [[7, 10]]); }
+document.querySelectorAll('[data-p]').forEach((b) => b.addEventListener('click', () => {
+  const [a, c] = b.dataset.p.split('|'); $('nin').value = a; $('nouts').value = c; parse(); all();
+}));
+$('nin').addEventListener('input', () => { parse(); all(); });
+$('nouts').addEventListener('input', () => { parse(); all(); });
+$('run').addEventListener('click', run);
+$('rnd').addEventListener('click', () => { newInput(); drawNet(); $('say').textContent = 'Новый случайный вход. Нажмите «прогнать вход».'; });
+parse(); all();
+</script>
+</body>
+</html>

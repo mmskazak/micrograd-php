@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Урок 2: Нейрон</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="learn.css">
+</head>
+<body>
+<main class="lesson">
+  <header>
+    <div class="kicker">Урок 2 из 8</div>
+    <h1>Нейрон: взвесить входы, сложить, сплющить</h1>
+    <p>Нейрон — это не новая сущность, а маленькая формула из тех же Value:
+      <code>out = tanh(b + w₁·x₁ + w₂·x₂ + w₃·x₃)</code>.
+      <b>Веса w</b> говорят, насколько важен каждый вход и в какую сторону он тянет. <b>Bias b</b> — сдвиг, с которого начинается сумма.
+      <b>tanh</b> сжимает любую сумму в диапазон от −1 до +1.</p>
+  </header>
+
+  <section class="card">
+    <h2>Покрутите сами</h2>
+    <div id="sl"></div>
+    <div class="two">
+      <div><svg id="diagram" viewBox="0 0 520 250" style="width:100%;height:auto"></svg></div>
+      <div>
+        <div class="say" id="formula"></div>
+        <p class="note">Попробуйте: поставьте w₂ = 0, и вход x₂ перестанет влиять на выход, как бы вы его ни двигали.
+          Сделайте вес отрицательным, и вход начнёт тянуть выход вниз.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="two">
+    <article class="card">
+      <h2>tanh и его наклон</h2>
+      <svg id="tanh" viewBox="0 0 460 260" style="width:100%;height:auto"></svg>
+      <div class="say" id="slope"></div>
+    </article>
+    <article class="card">
+      <h2>Код нейрона</h2>
+      <div id="code"></div>
+      <p class="note">Сумма собирается цепочкой: <code>b</code>, потом <code>+ w₁x₁</code>, потом <code>+ w₂x₂</code>…
+        Каждое <code>add</code> и <code>mul</code> — новый узел графа. Поэтому на графе ниже «+» идут друг за другом.</p>
+    </article>
+  </section>
+
+  <section class="card">
+    <h2>Тот же нейрон как граф Value</h2>
+    <p>Здесь backward запускается от <b>out</b>, и grad показывает, как выход нейрона зависит от каждого веса.
+      Обратите внимание на шаг через <code>tanh</code>: градиент умножается на наклон с графика выше.</p>
+    <div id="steps"></div>
+    <div class="say" id="say"></div>
+    <div class="graph-box" style="margin-top:8px"><svg id="g"></svg></div>
+  </section>
+
+  <section class="card retell">
+    <h2>Как объяснить другому</h2>
+    <ol>
+      <li>Нейрон берёт несколько чисел, умножает каждое на свой вес, складывает и прибавляет bias.</li>
+      <li>Вес — «ручка громкости» входа: большой — вход важен, ноль — вход игнорируется, минус — вход работает «против».</li>
+      <li>Результат проходит через tanh: большие суммы превращаются почти в +1, сильно отрицательные — почти в −1.</li>
+      <li>Для обучения важен наклон tanh: на краях он почти 0, и градиент почти не проходит («насыщение»). Поэтому в проекте начальные веса делятся на √(число входов), чтобы суммы на старте были небольшими.</li>
+      <li>Никакой магии: нейрон — просто несколько <code>mul</code>, <code>add</code> и один <code>tanh</code> над Value, и backward для него работает сам.</li>
+    </ol>
+  </section>
+  <nav class="pager" id="pager"></nav>
+</main>
+<script src="../nav.js"></script>
+<script src="engine.js"></script>
+<script>
+const CODE = `
+final class Neuron
+{
+    public array $w = [];   // по одному весу на каждый вход
+    public Value $b;        // bias
+
+    public function __construct(int $nin)
+    {
+        for ($i = 0; $i < $nin; $i++) {
+            $this->w[] = new Value(random_between(-1, 1) / sqrt($nin));
+        }
+        $this->b = new Value(0.0);
+    }
+
+    public function __invoke(array $x): Value
+    {
+        $act = $this->b;                              // начинаем с bias
+        for ($i = 0; $i < count($this->w); $i++) {
+            $act = $act->add($this->w[$i]->mul($x[$i])); // + wᵢ·xᵢ
+        }
+        return $act->tanh();                          // сплющиваем в [−1, 1]
+    }
+
+    public function parameters(): array
+    {
+        return [...$this->w, $this->b];
+    }
+}`;
+renderCode($('code'), CODE, [[16, 20]]);
+
+let S = { x1: 1, x2: -0.5, x3: 0.8, w1: 0.9, w2: -1.2, w3: 0.4, b: 0.1 };
+let net, stepper, k = 0;
+
+function build() {
+  const xs = [1, 2, 3].map((i) => new V(S['x' + i], [], '', 'x' + i));
+  const ws = [1, 2, 3].map((i) => new V(S['w' + i], [], '', 'w' + i));
+  const b = new V(S.b, [], '', 'b');
+  let act = b;
+  for (let i = 0; i < 3; i++) {
+    const m = ws[i].mul(xs[i]); m.label = `w${i + 1}·x${i + 1}`;
+    act = act.add(m); act.label = i === 2 ? 'n (сумма)' : `сумма до ${i + 1}`;
+  }
+  const out = act.tanh(); out.label = 'out';
+  return { xs, ws, b, n: act, out };
+}
+
+function diagram() {
+  const svg = $('diagram');
+  const ys = [50, 125, 200];
+  let h = '';
+  const maxW = 2;
+  for (let i = 0; i < 3; i++) {
+    const w = S['w' + (i + 1)], x = S['x' + (i + 1)];
+    const col = cssVar(w >= 0 ? '--pos' : '--neg');
+    h += `<path d="M62,${ys[i]} C170,${ys[i]} 200,125 290,125" fill="none" stroke="${col}" stroke-width="${0.8 + 6 * Math.abs(w) / maxW}" opacity="${0.25 + 0.75 * Math.min(1, Math.abs(w) / maxW)}"/>`;
+    h += `<text x="150" y="${ys[i] + (i === 1 ? -10 : i === 0 ? 18 : -14)}" font-size="12" fill="${cssVar('--ink-2')}" font-family="ui-monospace,monospace">×w${i + 1}=${f2(w)} → ${f2(w * x)}</text>`;
+    h += `<circle cx="40" cy="${ys[i]}" r="22" fill="${cssVar('--bg')}" stroke="${cssVar('--ink-3')}"/>
+      <text x="40" y="${ys[i] - 6}" text-anchor="middle" font-size="11" fill="${cssVar('--ink-3')}">x${i + 1}</text>
+      <text x="40" y="${ys[i] + 8}" text-anchor="middle" font-size="12" font-weight="700" fill="${cssVar('--ink')}">${f2(x)}</text>`;
+  }
+  h += `<circle cx="315" cy="125" r="26" fill="${cssVar('--surface')}" stroke="${cssVar('--ink')}" stroke-width="1.5"/>
+    <text x="315" y="117" text-anchor="middle" font-size="16" fill="${cssVar('--ink')}">Σ</text>
+    <text x="315" y="137" text-anchor="middle" font-size="11" fill="${cssVar('--ink')}">${f2(net.n.data)}</text>
+    <text x="315" y="175" text-anchor="middle" font-size="11" fill="${cssVar('--ink-3')}">+ b = ${f2(S.b)}</text>
+    <line x1="341" y1="125" x2="380" y2="125" stroke="${cssVar('--ink-3')}" stroke-width="1.5"/>
+    <rect x="380" y="105" width="56" height="40" rx="8" fill="${cssVar('--bg')}" stroke="${cssVar('--ink-3')}"/>
+    <text x="408" y="126" text-anchor="middle" font-size="13" fill="${cssVar('--ink')}">tanh</text>
+    <line x1="436" y1="125" x2="462" y2="125" stroke="${cssVar('--ink-3')}" stroke-width="1.5"/>
+    <circle cx="488" cy="125" r="24" fill="${cssVar(net.out.data >= 0 ? '--pos' : '--neg')}" opacity="${0.3 + 0.7 * Math.abs(net.out.data)}"/>
+    <text x="488" y="126" text-anchor="middle" font-size="12" font-weight="700" fill="${cssVar('--ink')}">${f2(net.out.data)}</text>
+    <text x="488" y="164" text-anchor="middle" font-size="11" fill="${cssVar('--ink-3')}">out</text>`;
+  svg.innerHTML = h;
+
+  const t = [1, 2, 3].map((i) => `${f2(S['w' + i])}·${f2(S['x' + i])}`).join(' + ');
+  $('formula').innerHTML = `<b>forward:</b><br><code>n = b + w₁x₁ + w₂x₂ + w₃x₃ = ${f2(S.b)} + ${t} = ${f3(net.n.data)}</code><br>
+    <code>out = tanh(${f3(net.n.data)}) = ${f3(net.out.data)}</code>`;
+}
+
+function tanhChart() {
+  const A = axes({ x: [-4, 4], y: [-1.2, 1.2], xTicks: 8, yTicks: 4, xLabel: 'n (сумма)', yLabel: 'tanh(n)' });
+  const pts = []; for (let x = -4; x <= 4.001; x += 0.05) pts.push([x, Math.tanh(x)]);
+  const n = Math.max(-4, Math.min(4, net.n.data)), t = Math.tanh(n), s = 1 - t * t;
+  const tan = [[n - 1.2, t - 1.2 * s], [n + 1.2, t + 1.2 * s]];
+  $('tanh').innerHTML = A.html +
+    `<path d="${pathOf(pts, A.X, A.Y)}" fill="none" stroke="${cssVar('--pos')}" stroke-width="2"/>
+     <path d="${pathOf(tan, A.X, A.Y)}" stroke="${cssVar('--hi')}" stroke-width="2" stroke-dasharray="5 4"/>
+     <circle cx="${A.X(n)}" cy="${A.Y(t)}" r="6" fill="${cssVar('--hi')}" stroke="${cssVar('--surface')}" stroke-width="2"/>`;
+  const sat = Math.abs(net.n.data) > 2.2;
+  $('slope').innerHTML = `Сейчас n = ${f3(net.n.data)}, наклон касательной = <code>1 − tanh² = ${f3(s)}</code>. ` +
+    (sat ? '<b>Нейрон насыщен:</b> наклон почти 0, градиент почти не проходит назад, и веса почти не меняются при обучении.'
+         : 'Наклон заметный: изменение суммы хорошо передаётся на выход, и градиент проходит назад.');
+}
+
+function renderGraph() {
+  stepper.go(k);
+  const info = stepper.info;
+  drawGraph($('g'), net.out, {
+    active: info?.node ?? (k === 1 ? net.out : null), recv: new Set(info ? info.node.prev : []),
+    explain: (v) => `<b>${esc(v.label)}</b><br>data ${f3(v.data)} · grad ${f3(v.grad)}`,
+  });
+  $('say').innerHTML = stepper.explain((v) => v.label);
+  ctl.count.textContent = `шаг ${k} из ${stepper.total}`;
+}
+
+function rebuild() {
+  net = build();
+  stepper = new BackwardStepper(net.out);
+  diagram(); tanhChart(); renderGraph();
+}
+const ctl = stepperControls($('steps'), (a) => {
+  if (a === 'reset') k = 0; else if (a === 'prev') k = Math.max(0, k - 1);
+  else if (a === 'next') k = Math.min(stepper.total, k + 1); else k = stepper.total;
+  renderGraph();
+});
+sliders('sl', [
+  { name: 'x1', label: 'x₁', min: -2, max: 2, value: S.x1 }, { name: 'x2', label: 'x₂', min: -2, max: 2, value: S.x2 },
+  { name: 'x3', label: 'x₃', min: -2, max: 2, value: S.x3 },
+  { name: 'w1', label: 'w₁', min: -2, max: 2, value: S.w1 }, { name: 'w2', label: 'w₂', min: -2, max: 2, value: S.w2 },
+  { name: 'w3', label: 'w₃', min: -2, max: 2, value: S.w3 }, { name: 'b', min: -2, max: 2, value: S.b },
+], (v) => { S = { ...v }; rebuild(); });
+k = 99; // по умолчанию показываем уже посчитанные градиенты
+rebuild();
+k = stepper.total; renderGraph();
+</script>
+</body>
+</html>
