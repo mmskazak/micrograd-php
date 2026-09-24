@@ -138,8 +138,9 @@ try {
             $lr = (float)($in['lr'] ?? DEFAULT_LR);
             $before = params($model);
             $log = [];
+            $perDigit = [];
             for ($i = 0; $i < $epochs; $i++) {
-                ['loss' => $loss, 'accuracy' => $acc] = Trainer::epoch($model, $lr);
+                ['loss' => $loss, 'accuracy' => $acc, 'perDigit' => $perDigit] = Trainer::epoch($model, $lr);
                 $log[] = ['epoch' => $store->logEpoch($loss, $acc, $lr), 'loss' => $loss, 'accuracy' => $acc];
             }
             $store->save($model);
@@ -148,6 +149,7 @@ try {
                 'epoch' => $store->epoch(),
                 'before' => $before,
                 'grads' => grads($model), // градиенты последней эпохи (по всем 10 цифрам)
+                'perDigit' => $perDigit,  // Σ (ypred − y)² каждой цифры в последней эпохе, до update
                 'params' => params($model),
             ];
             break;

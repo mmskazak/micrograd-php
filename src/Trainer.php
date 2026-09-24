@@ -31,11 +31,21 @@ final class Trainer
         return ['loss' => $loss, 'preds' => $preds];
     }
 
-    /** @return array{loss: float, accuracy: float} */
+    /** @return array{loss: float, accuracy: float, perDigit: float[]} */
     public static function epoch(MLP $model, float $lr): array
     {
         // 1–2. forward + loss
         ['loss' => $loss, 'preds' => $preds] = self::loss($model, array_keys(Digits::DIGITS));
+
+        // вклад каждой цифры в loss: Σ по 10 выходам (ypred − y)² — для визуализации
+        $perDigit = [];
+        foreach ($preds as $digit => $ypred) {
+            $sum = 0.0;
+            foreach (Digits::target($digit) as $k => $y) {
+                $sum += ($ypred[$k]->data - $y) ** 2;
+            }
+            $perDigit[$digit] = $sum;
+        }
 
         // 3. zero_grad
         foreach ($model->parameters() as $p) {
@@ -56,7 +66,7 @@ final class Trainer
                 $correct++;
             }
         }
-        return ['loss' => $loss->data, 'accuracy' => $correct / count($preds)];
+        return ['loss' => $loss->data, 'accuracy' => $correct / count($preds), 'perDigit' => $perDigit];
     }
 
     /** @param Value[] $outs */

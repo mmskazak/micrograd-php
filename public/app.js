@@ -83,7 +83,7 @@ function toggleSegment(i) {
 }
 
 // ---------- 2. сеть ----------
-const NET = { W: 760, top: 44, bottom: 486, left: 70, right: 660, r: 14 };
+const NET = { W: 930, top: 44, bottom: 486, left: 60, right: 590, r: 14 };
 function nodePos(c, i) {
   const n = S.sizes[c];
   const x = NET.left + c * (NET.right - NET.left) / (S.sizes.length - 1);
@@ -112,7 +112,7 @@ const MODE_HINT = {
 function renderNet() {
   const svg = $('net');
   const L = S.sizes.length;
-  const labels = ['вход: палочки', ...S.sizes.slice(1, -1).map((_, i) => `скрытый слой ${i + 1}`), 'выход: цифры'];
+  const labels = ['вход: палочки', ...S.sizes.slice(1, -1).map((_, i) => `скрытый слой ${i + 1}`), 'цифры'];
   let html = '';
   for (let c = 0; c < L; c++) {
     html += `<g class="layer" data-c="${c}">`;
@@ -150,6 +150,8 @@ function renderNet() {
     }
     html += '</g>';
   }
+  html += lossColumn();
+  svg.setAttribute('viewBox', `0 0 ${NET.W} 500`);
   svg.innerHTML = html;
   // выбранный нейрон рисуем поверх остальных связей
   svg.querySelectorAll('.edge.sel').forEach((e) => e.parentNode.insertBefore(e, e.parentNode.querySelector('.node')));
@@ -181,7 +183,74 @@ function renderNet() {
     });
     g.addEventListener('mousemove', moveTip);
   });
+  svg.querySelectorAll('.err').forEach((g) => {
+    const k = +g.dataset.k, o = S.fwd.outputs[k], t = k === S.fwd.target ? 1 : -1;
+    g.addEventListener('mousemove', (ev) => showTip(ev, `Нейрон «${k}»: выход ${fmt(o)}, цель ${t > 0 ? '+1' : '−1'}. (${fmt(o)} − (${t > 0 ? '+1' : '−1'}))² = ${((o - t) ** 2).toFixed(4)}`));
+    g.addEventListener('mouseleave', hideTip);
+  });
+  svg.querySelectorAll('.sum-node').forEach((g) => {
+    g.addEventListener('mousemove', (ev) => showTip(ev, `loss этого примера = сумма 10 квадратов ошибок слева = ${S.fwd.loss.toFixed(4)}. При обучении такие суммы считаются для всех 10 цифр и усредняются.`));
+    g.addEventListener('mouseleave', hideTip);
+  });
   $('mode-hint').textContent = MODE_HINT[S.mode];
+}
+
+/**
+ * Правая часть схемы: как 10 выходов превращаются в loss.
+ * (выход − цель)² у каждого нейрона-цифры → Σ = loss примера.
+ * Во время «1 шаг с разбором» ещё и loss эпохи = ¹⁄₁₀ Σ по 10 цифрам.
+ */
+function lossColumn() {
+  const L = S.sizes.length, f = S.fwd;
+  const [ox] = nodePos(L - 1, 0);
+  const bx = ox + 52, bw = 58;                 // квадраты ошибок
+  const sx = bx + bw + 64, sy = (NET.top + NET.bottom) / 2; // узел Σ
+  const ink = cssVar('--ink'), ink2 = cssVar('--ink-2'), ink3 = cssVar('--ink-3');
+  let h = `<g class="layer loss-col" data-c="${L}">`;
+  h += `<text class="col-label" x="${bx + bw / 2}" y="16">ошибка²</text>`;
+
+  f.outputs.forEach((o, k) => {
+    const [, y] = nodePos(L - 1, k);
+    const t = k === f.target ? 1 : -1, e = (o - t) ** 2;
+    const mag = Math.min(1, Math.sqrt(e) / 2);   // |выход − цель| / 2 ∈ [0, 1]
+    const goal = k === f.target;
+    h += `<g class="err" data-k="${k}">
+      <line x1="${ox + 38}" y1="${y}" x2="${bx}" y2="${y}" stroke="${ink3}" stroke-width="1"/>
+      <rect x="${bx}" y="${y - 9}" width="${bw}" height="18" rx="4" fill="${cssVar('--node-zero')}" stroke="${goal ? cssVar('--hi') : 'none'}" stroke-width="2"/>
+      <rect x="${bx}" y="${y - 9}" width="${(bw * mag).toFixed(1)}" height="18" rx="4" fill="${cssVar('--neg')}" opacity="0.55"/>
+      <text x="${bx + bw / 2}" y="${y}" text-anchor="middle" style="font-size:9.5px">${e < 0.001 ? e.toExponential(0) : e.toFixed(3)}</text>
+      <path d="M${bx + bw},${y} C${bx + bw + 34},${y} ${sx - 40},${sy} ${sx - 22},${sy}" fill="none" stroke="${ink3}"
+        stroke-width="${(0.6 + 3 * mag).toFixed(2)}" opacity="${(0.35 + 0.65 * mag).toFixed(2)}"/></g>`;
+  });
+
+  h += `<g class="sum-node">
+    <circle cx="${sx}" cy="${sy}" r="22" fill="${cssVar('--surface')}" stroke="${ink}" stroke-width="1.5"/>
+    <text x="${sx}" y="${sy - 6}" text-anchor="middle" style="font-size:15px">Σ</text>
+    <text x="${sx}" y="${sy + 9}" text-anchor="middle" style="font-size:9.5px">${f.loss.toFixed(3)}</text>
+    <text x="${sx}" y="${sy + 36}" text-anchor="middle" style="font-size:10.5px;font-weight:700">loss примера</text>
+    <text x="${sx}" y="${sy + 50}" text-anchor="middle" style="font-size:9.5px;fill:${ink2}">цифра ${f.target}</text></g>`;
+
+  if (STEP.active && STEP.i >= 1) {
+    // loss эпохи: 10 сумм (по одной на цифру) → среднее
+    const per = STEP.r.perDigit, max = Math.max(...per, 1e-9);
+    const ex = sx + 100, ey = sy, rowH = 15, top0 = sy - 60 - 10 * rowH;
+    h += `<text class="col-label" x="${ex}" y="16">loss эпохи</text>`;
+    per.forEach((v, d) => {
+      const y = top0 + d * rowH, cur = f.matched === d && f.target === d;
+      h += `<text x="${ex - 30}" y="${y}" style="font-size:9.5px;${cur ? 'font-weight:700' : ''}">${d}</text>
+        <rect x="${ex - 22}" y="${y - 5}" width="${(46 * v / max).toFixed(1)}" height="10" rx="2" fill="${cssVar('--neg')}" opacity="${cur ? 0.9 : 0.45}"><title>цифра ${d}: Σ (выход − цель)² = ${v.toFixed(4)}</title></rect>
+        <line x1="${ex + 28}" y1="${y}" x2="${ex}" y2="${ey - 26}" stroke="${ink3}" stroke-width="0.6" opacity="0.6"/>`;
+      if (cur) h += `<path d="M${sx + 16},${sy - 16} C${sx + 30},${y + 20} ${ex - 50},${y} ${ex - 36},${y}" fill="none" stroke="${cssVar('--hi')}" stroke-width="1.5" stroke-dasharray="3 3"/>`;
+    });
+    const back = STEP.i === 3;
+    h += `<circle cx="${ex}" cy="${ey}" r="25" fill="${cssVar('--surface')}" stroke="${back ? cssVar('--hi') : ink}" stroke-width="${back ? 3 : 2}"/>
+      <text x="${ex}" y="${ey - 6}" text-anchor="middle" style="font-size:10px;font-weight:700">loss</text>
+      <text x="${ex}" y="${ey + 8}" text-anchor="middle" style="font-size:9.5px">${STEP.r.log[0].loss.toFixed(4)}</text>
+      <text x="${ex}" y="${ey + 38}" text-anchor="middle" style="font-size:10px">= ¹⁄₁₀ · Σ</text>
+      <text x="${ex}" y="${ey + 51}" text-anchor="middle" style="font-size:10px">по 10 цифрам</text>` +
+      (back ? `<text x="${ex}" y="${ey + 68}" text-anchor="middle" style="font-size:10.5px;font-weight:700;fill:${cssVar('--hi')}">grad = 1 → старт</text>` : '');
+  }
+  return h + '</g>';
 }
 
 // ---------- 3. выход ----------
@@ -433,7 +502,7 @@ async function trainStepAnimated() {
 function phaseText(i) {
   const r = STEP.r;
   if (i === 0) return 'Все 10 цифр по очереди проходят через сеть слева направо. На схеме показан путь текущего входа: каждый нейрон считает tanh(b + Σ w·x) и передаёт результат следующему слою. Связи раскрашены по сигналу w·x.';
-  if (i === 1) return `Выходы всех 10 примеров сравниваются с целью (+1 у правильной цифры, −1 у остальных): loss = ¹⁄₁₀ Σ (выход − цель)² = <b>${r.log[0].loss.toFixed(4)}</b>. Это один узел <code>Value</code> — корень графа. Справа подсвечены выходы и цель текущего примера.`;
+  if (i === 1) return `Справа на схеме: у каждого из 10 выходов считается (выход − цель)², где цель +1 у правильной цифры и −1 у остальных. Эти 10 квадратов складываются в <b>Σ = loss примера</b>. Так делается для каждой из 10 цифр (полоски справа), и loss эпохи — их среднее: ¹⁄₁₀ · Σ = <b>${r.log[0].loss.toFixed(4)}</b>. Это один узел <code>Value</code> — корень графа.`;
   if (i === 2) return 'Перед backward все grad обнуляются, иначе к ним прибавились бы градиенты прошлой эпохи (backward делает grad += …). Схема в режиме градиентов, и все связи серые: градиентов пока нет.';
   if (i === 3) return '<code>loss.backward()</code>: в корне grad = 1, дальше по графу справа налево. Каждый узел раздаёт свой grad родителям по цепному правилу. Толстые связи — веса, которые сильнее всего влияют на loss (синий: вес надо уменьшить, красный: увеличить).';
   let maxD = 0, where = '';
@@ -489,8 +558,12 @@ async function goPhase(i) {
     if (alive()) net.classList.remove('phase');
   };
 
+  if (STEP.i === 1) {
+    net.classList.add('phase');
+    [S.sizes.length - 1, S.sizes.length].forEach((c) => net.querySelector(`.layer[data-c="${c}"]`)?.classList.add('lit'));
+  }
   if (STEP.i === 0) await light(cols);
-  if (STEP.i === 3) await light([...cols].reverse());
+  if (STEP.i === 3) await light([S.sizes.length, ...[...cols].reverse()]);
   if (STEP.i === 4) {
     if (!STEP.applied) {
       STEP.applied = true;
