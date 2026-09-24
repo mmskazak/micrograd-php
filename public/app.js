@@ -406,102 +406,145 @@ async function trainEpochs(total) {
   } finally { setBusy(false); }
 }
 
-/** Одна эпоха, разобранная по стадиям прямо на схеме сети */
+/**
+ * Одна эпоха, разобранная по стадиям прямо на схеме сети.
+ * Эпоха считается на сервере сразу (один запрос), а стадии пользователь листает сам:
+ * кнопки «◀ назад / дальше ▶» над схемой, стрелки ← → на клавиатуре, клик по стадии, Esc — закончить.
+ */
+const STEP = { active: false, i: 0, r: null, lr: 0, prevMode: 'signal', token: 0, applied: false };
+const PHASE_KEYS = ['forward', 'loss', 'zero', 'backward', 'update'];
+const PHASE_NAMES = ['forward', 'loss', 'zero_grad', 'backward', 'update'];
+
 async function trainStepAnimated() {
   setBusy(true);
-  const prevMode = S.mode;
-  const net = $('net');
-  const phases = [...document.querySelectorAll('#phases li')];
-  const phase = (key, text) => {
-    let seen = true;
-    phases.forEach((li) => {
-      const on = li.dataset.p === key;
-      li.classList.toggle('on', on);
-      li.classList.toggle('done', seen && !on);
-      if (on) seen = false;
-    });
-    $('phase-text').innerHTML = text;
-    const banner = $('net-phase');
-    banner.hidden = false;
-    banner.innerHTML = `<b>${phases.findIndex((li) => li.dataset.p === key) + 1}/5 · ${key === 'zero' ? 'zero_grad' : key}</b> ${text}`;
-  };
+  try {
+    STEP.lr = parseFloat($('lr').value) || S.lr;
+    STEP.r = await api('train', { epochs: 1, lr: STEP.lr });
+  } catch (e) {
+    setBusy(false);
+    throw e;
+  }
+  STEP.active = true;
+  STEP.applied = false;
+  STEP.prevMode = S.mode;
+  goPhase(0);
+}
+
+function phaseText(i) {
+  const r = STEP.r;
+  if (i === 0) return 'Все 10 цифр по очереди проходят через сеть слева направо. На схеме показан путь текущего входа: каждый нейрон считает tanh(b + Σ w·x) и передаёт результат следующему слою. Связи раскрашены по сигналу w·x.';
+  if (i === 1) return `Выходы всех 10 примеров сравниваются с целью (+1 у правильной цифры, −1 у остальных): loss = ¹⁄₁₀ Σ (выход − цель)² = <b>${r.log[0].loss.toFixed(4)}</b>. Это один узел <code>Value</code> — корень графа. Справа подсвечены выходы и цель текущего примера.`;
+  if (i === 2) return 'Перед backward все grad обнуляются, иначе к ним прибавились бы градиенты прошлой эпохи (backward делает grad += …). Схема в режиме градиентов, и все связи серые: градиентов пока нет.';
+  if (i === 3) return '<code>loss.backward()</code>: в корне grad = 1, дальше по графу справа налево. Каждый узел раздаёт свой grad родителям по цепному правилу. Толстые связи — веса, которые сильнее всего влияют на loss (синий: вес надо уменьшить, красный: увеличить).';
+  let maxD = 0, where = '';
+  r.params.forEach((layer, l) => layer.forEach((nr, n) => nr.w.forEach((w, i2) => {
+    const dlt = Math.abs(w - r.before[l][n].w[i2]);
+    if (dlt > maxD) { maxD = dlt; where = `${inputName(l, i2)} → ${neuronName(l, n)}`; }
+  })));
+  return `Каждый вес сдвигается против своего градиента: <code>w −= ${STEP.lr} · ∇w</code>. Сильнее всего изменился вес ${where}: на ${maxD.toFixed(4)}. Схема показывает, как веса переходят из старых в новые. Новые веса уже сохранены в SQLite.`;
+}
+
+async function goPhase(i) {
+  if (!STEP.active) return;
+  STEP.i = Math.max(0, Math.min(PHASE_KEYS.length - 1, i));
+  const token = ++STEP.token;               // быстрый клик «дальше» отменяет недоигранную анимацию
+  const alive = () => token === STEP.token && STEP.active;
+  const r = STEP.r, net = $('net');
+  const cols = [...Array(S.sizes.length).keys()];
+
+  // шапка стадий
+  document.querySelectorAll('#phases li').forEach((li, k) => {
+    li.classList.toggle('on', k === STEP.i);
+    li.classList.toggle('done', k < STEP.i);
+  });
+  const text = phaseText(STEP.i);
+  $('phase-text').innerHTML = text;
+  const last = STEP.i === PHASE_KEYS.length - 1;
+  const banner = $('net-phase');
+  banner.hidden = false;
+  banner.innerHTML = `<div class="np-head"><b>${STEP.i + 1}/5 · ${PHASE_NAMES[STEP.i]}</b>
+      <span class="np-btns">
+        <button data-go="prev"${STEP.i === 0 ? ' disabled' : ''}>◀ назад</button>
+        <button data-go="next" class="primary">${last ? 'готово ✓' : 'дальше ▶'}</button>
+        <button data-go="end" title="Esc">завершить</button>
+      </span></div><div>${text}</div>
+      <div class="np-keys">клавиши: ← → , Esc — завершить</div>`;
+  banner.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => stepNav(b.dataset.go)));
+
+  // состояние схемы для стадии (каждая стадия выставляет всё с нуля, поэтому «назад» работает)
+  $('out-card').classList.toggle('flash', STEP.i === 1);
+  net.querySelectorAll('.layer').forEach((g) => g.classList.remove('lit'));
+  net.classList.remove('phase');
+  S.paramsView = STEP.i === 4 ? r.params : r.before;
+  S.gradsView = STEP.i === 2 ? r.grads.map((layer) => layer.map((nr) => ({ w: nr.w.map(() => 0), b: 0 }))) : r.grads;
+  setMode(STEP.i <= 1 ? 'signal' : STEP.i <= 3 ? 'grads' : 'weights');
+
   const light = async (order) => {
     net.classList.add('phase');
     for (const c of order) {
-      net.querySelector(`.layer[data-c="${c}"]`).classList.add('lit');
-      await sleep(380);
+      if (!alive()) return;
+      $('net').querySelector(`.layer[data-c="${c}"]`)?.classList.add('lit');
+      await sleep(450);
     }
+    if (alive()) net.classList.remove('phase');
   };
-  const cols = [...Array(S.sizes.length).keys()];
 
-  try {
-    const lr = parseFloat($('lr').value) || S.lr;
-    const r = await api('train', { epochs: 1, lr });
-    const loss = r.log[0].loss;
-
-    // 1. forward
-    S.paramsView = r.before;
-    setMode('signal');
-    phase('forward', 'Все 10 цифр по очереди проходят через сеть слева направо. На схеме — путь текущего входа: каждый нейрон считает tanh(b + Σ w·x) и передаёт результат дальше.');
-    await light(cols);
-    await sleep(300);
-
-    // 2. loss
-    phase('loss', `Выходы всех 10 примеров сравниваются с целью (+1 у правильной цифры, −1 у остальных): loss = ¹⁄₁₀ Σ (выход − цель)² = <b>${loss.toFixed(4)}</b>. Это один узел <code>Value</code> — корень графа.`);
-    $('out-card').classList.add('flash');
-    await sleep(1300);
-    $('out-card').classList.remove('flash');
-
-    // 3. zero_grad
-    S.gradsView = r.grads.map((layer) => layer.map((nr) => ({ w: nr.w.map(() => 0), b: 0 })));
-    net.classList.remove('phase');
-    setMode('grads');
-    phase('zero', 'Перед backward все grad обнуляются, иначе к ним прибавились бы градиенты прошлой эпохи (grad += …). Все связи стали серыми: градиентов пока нет.');
-    await sleep(1400);
-
-    // 4. backward
-    S.gradsView = r.grads;
-    renderNet();
-    phase('backward', '<code>loss.backward()</code>: grad = 1 в корне, дальше по графу справа налево. Каждый узел раздаёт свой grad родителям по цепному правилу. Толстые связи — веса, которые сильнее всего влияют на loss.');
-    net.querySelectorAll('.layer').forEach((g) => g.classList.remove('lit'));
-    await light([...cols].reverse());
-    await sleep(500);
-
-    // 5. update — плавно ведём веса от старых к новым
-    net.classList.remove('phase');
-    setMode('weights');
-    let maxD = 0, where = '';
-    r.params.forEach((layer, l) => layer.forEach((nr, n) => nr.w.forEach((w, i) => {
-      const dlt = Math.abs(w - r.before[l][n].w[i]);
-      if (dlt > maxD) { maxD = dlt; where = `${inputName(l, i)} → ${neuronName(l, n)}`; }
-    })));
-    phase('update', `Каждый вес сдвигается против своего градиента: <code>w −= ${lr} · ∇w</code>. Сильнее всего изменился вес ${where}: на ${maxD.toFixed(4)}. Новые веса сохранены в SQLite.`);
-    const frames = 24;
-    for (let f = 1; f <= frames; f++) {
+  if (STEP.i === 0) await light(cols);
+  if (STEP.i === 3) await light([...cols].reverse());
+  if (STEP.i === 4) {
+    if (!STEP.applied) {
+      STEP.applied = true;
+      S.params = r.params; S.epoch = r.epoch; S.history.push(...r.log);
+      renderChart(); renderStats();
+    }
+    const frames = 30;
+    for (let f = 1; f <= frames && alive(); f++) {
       const t = f / frames;
       S.paramsView = r.before.map((layer, l) => layer.map((nr, n) => ({
-        w: nr.w.map((w, i) => w + (r.params[l][n].w[i] - w) * t),
+        w: nr.w.map((w, k) => w + (r.params[l][n].w[k] - w) * t),
         b: nr.b + (r.params[l][n].b - nr.b) * t,
       })));
       renderNet();
       await sleep(40);
     }
-
-    S.params = r.params; S.epoch = r.epoch; S.history.push(...r.log);
-    renderChart(); renderStats();
-    await sleep(900);
-    phases.forEach((li) => { li.classList.remove('on'); li.classList.add('done'); });
-  } finally {
-    $('net-phase').hidden = true;
-    S.paramsView = null; S.gradsView = null;
-    net.classList.remove('phase');
-    net.querySelectorAll('.layer').forEach((g) => g.classList.remove('lit'));
-    S.mode = prevMode;
-    await refresh();
-    setMode(prevMode);
-    setBusy(false);
   }
 }
+
+function stepNav(dir) {
+  if (!STEP.active) return;
+  if (dir === 'prev') goPhase(STEP.i - 1);
+  else if (dir === 'next' && STEP.i < PHASE_KEYS.length - 1) goPhase(STEP.i + 1);
+  else finishStep();
+}
+
+async function finishStep() {
+  if (!STEP.active) return;
+  const r = STEP.r;
+  if (!STEP.applied) { // закончили раньше пятой стадии — эпоха всё равно уже посчитана на сервере
+    S.params = r.params; S.epoch = r.epoch; S.history.push(...r.log);
+    renderChart(); renderStats();
+  }
+  STEP.active = false; STEP.token++;
+  $('net-phase').hidden = true;
+  $('out-card').classList.remove('flash');
+  document.querySelectorAll('#phases li').forEach((li) => { li.classList.remove('on'); li.classList.add('done'); });
+  $('phase-text').innerHTML = `Эпоха ${r.epoch} готова: loss до шага был ${r.log[0].loss.toFixed(4)}. Нажмите «1 шаг с разбором» ещё раз, чтобы разобрать следующую.`;
+  S.paramsView = null; S.gradsView = null;
+  const net = $('net');
+  net.classList.remove('phase');
+  net.querySelectorAll('.layer').forEach((g) => g.classList.remove('lit'));
+  S.mode = STEP.prevMode;
+  await refresh();
+  setMode(STEP.prevMode);
+  setBusy(false);
+}
+
+document.addEventListener('keydown', (e) => {
+  if (!STEP.active || e.target.closest('input, select, textarea')) return;
+  if (e.key === 'ArrowRight') { e.preventDefault(); stepNav('next'); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); stepNav('prev'); }
+  if (e.key === 'Escape') finishStep();
+});
 
 // ---------- старт ----------
 async function init() {
@@ -523,6 +566,7 @@ async function init() {
   document.querySelectorAll('#mode button').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
   $('target').addEventListener('change', (e) => { S.target = e.target.value === '' ? null : +e.target.value; refresh(); });
   $('btn-step').addEventListener('click', trainStepAnimated);
+  document.querySelectorAll('#phases li').forEach((li, k) => li.addEventListener('click', () => { if (STEP.active) goPhase(k); }));
   $('btn-50').addEventListener('click', () => trainEpochs(50));
   $('btn-200').addEventListener('click', () => trainEpochs(200));
   $('btn-reset').addEventListener('click', async () => {

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#1a1a19"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- шаблон индекса: все 9 палочек бледно -->
+    <path d="M20 10H44M20 10V32M44 10V32M44 10L20 32M20 32H44M20 32V54M44 32V54M44 32L20 54M20 54H44" stroke="#45443f" stroke-width="4"/>
+    <!-- цифра 2: верх, правая верхняя, нижняя диагональ, низ -->
+    <path d="M20 10H44V32L20 54H44" stroke="#3987e5" stroke-width="6"/>
+  </g>
+</svg>
